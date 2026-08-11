@@ -1,0 +1,155 @@
+{
+  "meta": {
+    "owner_preferred_name": "Teddy",
+    "last_consolidated": "2026-08-12",
+    "purpose": "Portable historical technical context for future AI agents",
+    "ground_truth_rule": "Current source code, terminal output, hardware measurements, and firmware state override historical notes."
+  },
+  "domains": [
+    "wheel-legged robotics",
+    "control systems",
+    "ROS2 Humble",
+    "MATLAB Simulink",
+    "EtherCAT SOEM",
+    "STM32 embedded firmware",
+    "Hipnuc IMU CAN FDCAN",
+    "MuJoCo",
+    "Isaac Lab",
+    "reinforcement learning",
+    "motor and propeller testing"
+  ],
+  "main_project": {
+    "name": "wheel-legged robot",
+    "hardware": {
+      "joint_motors": "4 x DM-J4310",
+      "wheel_motors": "2 x DM-H3510",
+      "approx_total_mass_kg": 2.8,
+      "common_wheel_diameter_mm": 60,
+      "ethercat_slave_platform": "AX58100 + STM32H750"
+    },
+    "leg_model": {
+      "type": "planar five-bar",
+      "functions_seen": ["fivebar_fk", "fivebar_ik", "Motor_Position_To_Joint"],
+      "force_to_torque": "tau = J^T F",
+      "historical_geometry_m": {
+        "L1": 0.0804,
+        "L2": 0.12,
+        "L3": 0.12,
+        "L4": 0.0804,
+        "L5": 0.07
+      },
+      "warning": "Geometry changed across revisions; verify active source before reuse."
+    },
+    "control": {
+      "methods": ["VMC", "cascaded PID", "LQR", "gravity feed-forward"],
+      "mit_mode_usage": "Often torque-focused with kp=0 and kd=0, torque as feed-forward",
+      "historical_symptoms": [
+        "divergent forward/back sinusoidal motion",
+        "startup shaking around pitch zero",
+        "little correction when laid down in some tests",
+        "height static error around 7-11 mm in one VMC tuning snapshot"
+      ]
+    }
+  },
+  "ros2_ethercat": {
+    "os": "Ubuntu 22.04",
+    "ros": "ROS2 Humble",
+    "simulink": "R2023b",
+    "workspaces_seen": ["~/foot_ws", "~/ZLT"],
+    "packages_seen": ["custom_msgs", "soem", "soem_bringup", "soem_wrapper"],
+    "topic_patterns": [
+      "/ecat/<sn>/app1/read",
+      "/ecat/<sn>/app2/read",
+      "/ecat/<sn>/app3/write",
+      "/latency"
+    ],
+    "historical_rates_hz": {
+      "simulink_initial": 100,
+      "control_target": 333.33,
+      "imu_common": 333,
+      "imu_desired_later": 500,
+      "soem_observed_approx": 2750
+    }
+  },
+  "ethercat_debugging": {
+    "order": [
+      "physical link",
+      "slave discovery",
+      "EEPROM and identity",
+      "INIT PREOP SAFEOP OP state transition",
+      "PDO mapping and WKC",
+      "application payload",
+      "ROS2 wrapper"
+    ],
+    "historical_failure": {
+      "slaves_found": 1,
+      "workcounter": 0,
+      "state": "INIT",
+      "io_bits": 0
+    }
+  },
+  "stm32_flashing": {
+    "target": "STM32H750",
+    "debugger": "ST-LINK",
+    "openocd_configs": ["interface/stlink.cfg", "target/stm32h7x.cfg"],
+    "failures_seen": [
+      "timeout waiting for target halted",
+      "target not halted",
+      "large verify/program error counts"
+    ],
+    "principles": [
+      "start SWD at low adapter speed",
+      "verify target voltage",
+      "separate communication failure from image format problems"
+    ]
+  },
+  "imu": {
+    "repo": "AIMEtherCAT/hipnucimu",
+    "topics": ["multi-IMU", "CAN", "FDCAN", "ID changes", "G431/G341 transfer boards"],
+    "historical_pitch_convention": "forward positive in one robot integration",
+    "warning": "Always re-check actual sensor frame and ROS transform."
+  },
+  "mujoco": {
+    "models_seen": [
+      "fixed_leg_wheelbot.xml",
+      "real_mesh_dynamic_template_v2.xml",
+      "simplified_120mm_wheelbot.xml",
+      "car.xml"
+    ],
+    "historical_balance_snapshot": {
+      "INITIAL_PITCH_DEG": 30,
+      "Kp_wheel": 0.08,
+      "Kp_pitch": 1.52,
+      "Kd_pitch": 1.2,
+      "torque_limit": 0.8,
+      "OUTPUT_SIGN": -1
+    }
+  },
+  "isaac_lab": {
+    "workspace": "E:\\IsaacWork\\IsaacLab",
+    "historical_version": "2.3.2",
+    "historical_isaac_sim": "5.1.0.0",
+    "python": "E:\\IsaacWork\\env_isaaclab\\python.exe",
+    "lesson": "Use the Isaac Lab environment/launcher; generic Python previously caused ModuleNotFoundError: isaaclab.",
+    "rl_curriculum_preference": [
+      "standing",
+      "velocity tracking",
+      "disturbance robustness",
+      "terrain and dynamic behavior"
+    ]
+  },
+  "repositories": [
+    "AIMEtherCAT/EcatV2_Master",
+    "AIMEtherCAT/hipnucimu",
+    "ControlSystemLab-UNNC/Bipedal-Robot-RL-Controller",
+    "ssybh2/foot_ws-ethercat",
+    "ssybh2/Knowledge-Chatgpt"
+  ],
+  "agent_rules": [
+    "Do not silently merge conflicting historical parameter sets.",
+    "Separate simulation values from real-hardware values.",
+    "Verify sign, units, limits, feedback freshness, and timing before gain tuning.",
+    "Prefer reproducible terminal commands and small controlled tests.",
+    "For RL inspect observations, actions, rewards, termination, reset/randomization, curriculum, and logs before blaming network architecture."
+  ]
+}
