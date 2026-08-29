@@ -1,0 +1,2 @@
+{"candidate_id":"cand_synthetic_project","decision":"approve","category":"project","title":"Synthetic EtherCAT servo work","summary":"Worked on a synthetic read-only EtherCAT servo integration path.","keywords":["EtherCAT","servo"],"event_time":1787757630,"revision":1}
+{"candidate_id":"cand_synthetic_reject","decision":"reject"}
