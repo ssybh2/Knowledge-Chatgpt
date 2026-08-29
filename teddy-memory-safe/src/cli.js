@@ -10,6 +10,13 @@ import { writeD1Batches } from './d1-export.js';
 
 const CATEGORIES = new Set(['project', 'learning', 'decision', 'plan', 'preference', 'reference']);
 const PRIVATE_ID_MARKERS = ['conversation_id', 'message_id', 'source_archive_id', 'source_conversation_id', 'original_message_id'];
+const SQL_HIGH_CONFIDENCE_REASONS = new Set([
+  'credential_secret',
+  'health_phi',
+  'auth_security_record',
+  'attachment_or_unreviewed_binary',
+  'uncertain_restricted_data',
+]);
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -270,7 +277,9 @@ async function auditSafe(options, io) {
   const sqlFiles = (await readdir(sqlDir)).filter((name) => name.toLowerCase().endsWith('.sql')).sort();
   for (const name of sqlFiles) {
     const sql = await readFile(join(sqlDir, name), 'utf8');
-    for (const reason of scanRestrictedText(sql)) incrementCounter(restrictedReasons, reason);
+    for (const reason of scanRestrictedText(sql)) {
+      if (SQL_HIGH_CONFIDENCE_REASONS.has(reason)) incrementCounter(restrictedReasons, reason);
+    }
     const lower = sql.toLowerCase();
     for (const marker of PRIVATE_ID_MARKERS) {
       if (lower.includes(marker)) incrementCounter(privateIdMarkers, marker);
