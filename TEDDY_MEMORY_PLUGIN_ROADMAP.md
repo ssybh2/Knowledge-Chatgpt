@@ -1,180 +1,198 @@
-# Teddy Memory App/Plugin Roadmap
+# Teddy Memory App / Plugin Roadmap
 
-本文档记录把现有 Teddy Memory REST API 包装成 ChatGPT 可调用 App/Plugin 的实施进度。
+本文档记录 Teddy Memory 从私人外置长期记忆系统扩展到 ChatGPT Plugin-Safe 双轨架构的实施进度。
 
-## 1. 已完成的记忆后端
+## 1. 双轨目标
+
+```text
+Private Full Memory Track              Plugin-Safe Track
+完整私人历史                           审核后的安全记忆
+       │                                      │
+teddy-memory-api                         teddy-memory-safe
+       │                                      │
+teddy-memory-mcp                         teddy-memory-plugin-safe D1
+       │                                      │
+受控私人客户端                            future teddy-memory-plugin
+```
+
+完整私人档案不会为了公开 Plugin 审核而删减；公开 Plugin 也不会获得读取完整私人 D1 的技术路径。
+
+## 2. Private Full Memory Track — 已跑通
+
+现有私人系统：
 
 - Cloudflare Worker：`teddy-memory-api`
-- Cloudflare D1：历史对话数据库
-- Bearer 鉴权
-- `searchMemory`
-- `getContext`
-- `getConversation`
-- OpenAPI schema
+- 私人 D1：`teddy-memory-core`
+- 远程 MCP Worker：`teddy-memory-mcp`
+- Streamable HTTP `/mcp`
+- Cloudflare Service Binding：`teddy-memory-mcp -> teddy-memory-api`
+- 客户端鉴权：`MCP_ACCESS_TOKEN`
+- 后端鉴权：`MEMORY_API_KEY`
+- 两个 secret 职责分离
 
-## 2. MCP 当前状态
+私人 MCP 工具：
 
-第一版只读 MCP adapter 已在 `teddy-memory-mcp/` 实现。
+- `get_context`
+- `search_memory`
+- `get_conversation`
 
-```text
-[x] 建立 MCP server 项目目录
-[x] 定义 get_context tool
-[x] 定义 search_memory tool
-[x] 定义 get_conversation tool
-[x] 从环境变量读取 MEMORY_API_KEY
-[x] 调用现有 Cloudflare REST API
-[x] 错误处理 / timeout
-[x] stdio 入口
-[x] read-only annotations
-[x] 自动测试与 CI
-[x] 本地配置说明
-[x] 增加远程 Streamable HTTP handler
-[x] 增加 Cloudflare Worker entry
-[x] Host allowlist
-[x] present-Origin allowlist
-[x] 独立 MCP_ACCESS_TOKEN 客户端鉴权
-[x] 保持 MEMORY_API_KEY 仅服务器端使用
-[x] Wrangler Cloudflare bundling dry-run
-[ ] 使用真实 MEMORY_API_KEY 做本地 MCP Inspector live test
-[ ] 把 teddy-memory-mcp 实际部署到 Cloudflare
-[ ] 配置部署端 MEMORY_API_KEY secret
-[ ] 配置部署端 MCP_ACCESS_TOKEN secret
-[ ] 对公网 /healthz 与 /mcp 做 live test
-[ ] 在支持 Developer Mode / custom MCP 的 ChatGPT 环境扫描工具并测试
-[ ] 将私人静态 Bearer 认证升级为正式 App/Plugin 发布所需认证
-[ ] 准备 Plugin/App 发布或目录分发材料
-```
-
-## 3. 当前 MCP 工具
-
-### `get_context`
-
-默认历史工具。输入：`query`、`keywords`、`max_conversations`、`before`、`after`。
-
-内部调用：`POST /v1/context`。
-
-### `search_memory`
-
-用于定位历史记录。输入：`query`、`keywords`、`limit`。
-
-内部调用：`POST /v1/search`。
-
-### `get_conversation`
-
-用于精确恢复一个 conversation。输入：`conversation_id`、`limit`、`offset`。
-
-内部调用：`GET /v1/conversation/{conversation_id}`。
-
-## 4. 已实现架构
+已完成 live verification：
 
 ```text
-Local MCP host
-        ↓ stdio
-Teddy Memory MCP
-        ↓
-Teddy Memory REST API
+[x] /healthz 公网可用
+[x] 无 MCP_ACCESS_TOKEN 时 /mcp 拒绝
+[x] tools/list 返回三个只读工具
+[x] get_context 通过公网 MCP -> Service Binding -> REST API -> D1 返回真实历史
+[x] 中文 UTF-8 内容可正确恢复
 ```
 
-以及：
+私人 Track 保持现状，不因 Plugin-Safe 开发而修改其数据边界。
+
+## 3. 为什么增加 Plugin-Safe Track
+
+正式公开 Plugin 不能直接把完整私人聊天 archive 原样作为公共插件数据源。因此建立独立 safe corpus：只有经过离线 deterministic deny rules、人工明确 approve、最终二次扫描后的记录才能进入公开路径。
+
+设计 spec：
 
 ```text
-Remote MCP client / future ChatGPT App
-        ↓ HTTPS + MCP_ACCESS_TOKEN
-/mcp — Streamable HTTP
-        ↓
-Teddy Memory MCP Cloudflare Worker
-        ↓ HTTPS + server-side MEMORY_API_KEY
-Teddy Memory REST API
-        ↓
-Cloudflare D1
+docs/superpowers/specs/2026-08-29-teddy-memory-dual-track-plugin-design.md
 ```
 
-不重写 D1，也不把历史消息复制进 MCP Worker。
+## 4. Plan 1 — Safe corpus + separate D1
 
-## 5. 两层认证
-
-### MCP client → MCP Worker
-
-当前私人部署阶段：
+实施计划：
 
 ```text
-Authorization: Bearer <MCP_ACCESS_TOKEN>
+docs/superpowers/plans/2026-08-29-teddy-memory-safe-corpus.md
 ```
 
-### MCP Worker → Teddy Memory REST API
+当前实现位于：
 
 ```text
-Authorization: Bearer <MEMORY_API_KEY>
+teddy-memory-safe/
 ```
 
-两个 secret 的职责严格分离。远程 MCP 客户端不需要拿到 `MEMORY_API_KEY`。
-
-`MCP_ACCESS_TOKEN` 只是第一阶段私人远程测试方案。面向正式 ChatGPT App/Plugin 发布时，按届时平台要求升级为标准 OAuth / workspace-managed auth；后端 D1 和 REST API 不受影响。
-
-## 6. 远程安全边界
-
-- `/healthz` 公开，但只返回服务健康状态。
-- `/mcp` 需要 `MCP_ACCESS_TOKEN`。
-- Host 必须在 `MCP_ALLOWED_HOSTS` 中。
-- 如果请求携带 `Origin`，Origin hostname 必须在 `MCP_ALLOWED_ORIGINS` 中。
-- 无 Origin 的 server-to-server MCP 请求在通过 Host + Bearer 后允许。
-- MCP tools 继续保持只读。
-- Cloudflare/GitHub 登录凭据不进入 MCP。
-
-## 7. CI 验证
-
-GitHub Actions 当前验证：
+已完成：
 
 ```text
-npm install
-npm test
-npm run smoke
-npm run cf:dry-run
+[x] Node.js 22 safe-pipeline package
+[x] streaming JSONL reader/writer
+[x] private source contracts
+[x] deterministic restricted-data scanner
+[x] credential / payment-card / government-ID deny rules
+[x] health/PHI deny rules
+[x] auth-security / precise-contact / raw-attachment deny rules
+[x] default-pending review candidate builder
+[x] stable candidate_id
+[x] explicit approve/reject compiler
+[x] blocked source cannot be overridden by edited summary
+[x] final title/summary/keywords second-pass scan
+[x] approved output strips private source IDs
+[x] opaque memory_ref
+[x] separate safe D1 schema
+[x] idempotent UPSERT SQL exporter
+[x] batched SQL files
+[x] build-candidates CLI
+[x] compile-approved CLI
+[x] export-d1 CLI
+[x] aggregate-only stats CLI
+[x] --max-candidates bounded dry-run option
+[x] entirely synthetic end-to-end invariant tests
+[x] local private-output gitignore boundary
+[x] independent GitHub Actions workflow
+[x] operator README
+[ ] first local real-data 100-candidate dry run
+[ ] manually approve only 5–20 clearly safe memories
+[ ] inspect approved JSONL and generated SQL locally
+[ ] create physically separate D1 `teddy-memory-plugin-safe`
+[ ] import the first manually reviewed safe corpus
+[ ] verify the existing private MCP still works unchanged after safe-D1 creation
 ```
 
-`cf:dry-run` 使用 Wrangler 对 Cloudflare Workers entry 做真实 bundling，不进行公网部署。
+The real review queue, decisions, approved corpus, generated SQL and source export are local-only and must never be committed.
 
-当前 Node.js 开发基线为 22+，因为当前 Wrangler 4.127.1 要求 Node.js 22+。
+## 5. Separate safe database
 
-## 8. 现在的下一步
-
-代码侧已经走到“可部署”阶段。下一步需要 Cloudflare 账户环境：
-
-1. `npx wrangler login`
-2. `npx wrangler secret put MEMORY_API_KEY`
-3. `npx wrangler secret put MCP_ACCESS_TOKEN`
-4. `npx wrangler deploy`
-5. 验证 `/healthz`
-6. 用 MCP HTTP client / Inspector 对 `/mcp` 做 tools/list 和三个工具 live test
-7. 再进入 ChatGPT Developer Mode / App 工具扫描
-
-详细操作见 `teddy-memory-mcp/README.md`。
-
-## 9. ChatGPT 产品约束
-
-ChatGPT 不能直接连接本机 stdio MCP，因此远程 HTTPS MCP 是必要的一层。自定义 App / Developer Mode 的套餐与发布规则会变化，所以本项目坚持：
+The public-safe database is intentionally different from the private archive database:
 
 ```text
-标准 MCP
-+
-独立 Teddy Memory REST API
-+
-Cloudflare D1
+private: teddy-memory-core
+safe:    teddy-memory-plugin-safe
 ```
 
-这样未来即使 ChatGPT 外层接入规则变化，核心长期记忆不需要迁移。
+The future public Plugin Worker must bind only `teddy-memory-plugin-safe`. It must not bind `teddy-memory-core`, must not receive `MEMORY_API_KEY`, and must not call `teddy-memory-api` as a fallback.
 
-## 10. 后续增强
+## 6. Planned public Plugin tools
 
-基础远程 App 跑通以后再考虑：
+The public Plugin will not expose full historical conversations.
 
-- 正式 OAuth
+Planned v1 tools:
+
+- `get_context`
+- `search_memory`
+- `get_memory_item`
+
+Not exposed on public track:
+
+- `get_conversation`
+- import/update/delete operations
+- raw archive retrieval
+- Cloudflare administration
+
+## 7. Plan 2 — teddy-memory-plugin MCP Worker
+
+Start only after Plan 1 completion gate passes.
+
+Plan 2 will implement a new Cloudflare Worker backed directly by `teddy-memory-plugin-safe` with owner-scoped, read-only queries and response minimization. Authentication can initially be isolated behind a test identity boundary so query/data isolation is verified before OAuth complexity is introduced.
+
+Target host:
+
+```text
+https://teddy-memory-plugin.3767174214.workers.dev
+```
+
+## 8. Plan 3 — Auth0 / OAuth 2.1
+
+After safe-D1 query behavior is verified:
+
+- Auth0 Authorization Code + PKCE
+- `memory:read` scope only
+- OAuth subject -> plugin `owner_id`
+- issuer / audience / expiry / scope validation
+- OAuth protected-resource discovery
+- reviewer demo account with synthetic corpus only
+
+`MCP_ACCESS_TOKEN` remains a private-track credential and is not the final public Plugin login mechanism.
+
+## 9. Plan 4 — Plugin submission package
+
+Prepare:
+
+- product summary page
+- support page
+- privacy policy
+- terms
+- domain/app verification challenge
+- plugin metadata
+- starter prompts
+- reviewer demo credentials
+- at least five positive review tests
+- at least three negative/security tests
+- release notes
+
+Public submission materials must never include private archive contents or secrets.
+
+## 10. Future enhancements after public read-only path
+
+Only after the base Plugin is stable:
+
 - `get_profile`
 - `list_projects`
 - `get_project_context`
-- 文件/附件 Asset Archive
-- 自动长期摘要
-- 增量导入新 ChatGPT export
-- 更细粒度权限控制
+- attachment / Asset Archive strategy
+- incremental safe-memory curation
+- higher-quality semantic ranking
+- revision-aware project summaries
+- optional self-service onboarding if Teddy Memory ever becomes multi-user
 
-暂不加入写入/删除记忆或 Cloudflare 管理工具。
+Write/delete memory operations remain out of scope for the first public release.
