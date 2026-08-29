@@ -13,6 +13,11 @@ test('detects valid payment card candidates with Luhn and ignores invalid digit 
   assert.ok(!scanRestrictedText('number 4242 4242 4242 4241').includes('payment_card'));
 });
 
+test('does not treat opaque ids embedded in longer numeric runs as payment/contact data', () => {
+  assert.deepEqual(scanRestrictedText('sm_00000000000000000000000000000001'), []);
+  assert.deepEqual(scanRestrictedText('mem_00000000000000000000000000000001'), []);
+});
+
 test('blocks health/PHI-like content conservatively', () => {
   assert.ok(scanRestrictedText('体检报告和同型半胱氨酸结果').includes('health_phi'));
   assert.ok(scanRestrictedText('patient diagnosis and lab result').includes('health_phi'));
