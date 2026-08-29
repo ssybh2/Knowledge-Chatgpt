@@ -6,9 +6,10 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test",
-    "smoke": "node --check src/worker.js && node --check scripts/live-smoke.mjs && node --check scripts/oauth-login.mjs && node --input-type=module -e \"await import('./src/worker.js'); await import('./scripts/live-smoke.mjs'); await import('./scripts/oauth-login.mjs')\"",
+    "smoke": "node --check src/worker.js && node --check scripts/live-smoke.mjs && node --check scripts/oauth-login.mjs && node --check scripts/chatgpt-compat.mjs && node --input-type=module -e \"await import('./src/worker.js'); await import('./scripts/live-smoke.mjs'); await import('./scripts/oauth-login.mjs'); await import('./scripts/chatgpt-compat.mjs')\"",
     "live:smoke": "node scripts/live-smoke.mjs",
     "oauth:login": "node scripts/oauth-login.mjs",
+    "compat:chatgpt": "node scripts/chatgpt-compat.mjs",
     "cf:dry-run": "wrangler deploy --dry-run --outdir dist"
   },
   "dependencies": {
