@@ -114,6 +114,7 @@ test('stats prints aggregate counts and never source content', async () => {
   assert.equal(code, 0);
   assert.match(cap.stdout, /"records":2/);
   assert.match(cap.stdout, /"blocked":1/);
+  assert.match(cap.stdout, /"health_phi":1/);
   assert.ok(!cap.stdout.includes('DO_NOT_PRINT_THIS'));
   assert.ok(!cap.stdout.includes('ALSO_PRIVATE'));
 });
