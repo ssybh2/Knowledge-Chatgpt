@@ -1,0 +1,29 @@
+name: Teddy Memory MCP
+
+on:
+  push:
+    branches:
+      - feat/teddy-memory-mcp
+    paths:
+      - 'teddy-memory-mcp/**'
+      - '.github/workflows/teddy-memory-mcp.yml'
+  pull_request:
+    paths:
+      - 'teddy-memory-mcp/**'
+      - '.github/workflows/teddy-memory-mcp.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: teddy-memory-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: teddy-memory-mcp/package-lock.json
+      - run: npm install
+      - run: npm test
