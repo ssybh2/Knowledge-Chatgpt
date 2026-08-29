@@ -97,9 +97,25 @@ export function createMemoryRepository(db) {
 
       const sql = `
         WITH owner_rows AS (
-          SELECT memory_ref, title, category, summary, event_time, revision, keywords_json
-          FROM safe_memories
-          WHERE owner_id = ? AND is_active = 1
+          SELECT
+            memory.memory_ref AS memory_ref,
+            memory.title AS title,
+            memory.category AS category,
+            memory.summary AS summary,
+            memory.event_time AS event_time,
+            memory.revision AS revision,
+            memory.keywords_json AS keywords_json
+          FROM safe_active_snapshot active
+          JOIN safe_snapshots snapshot
+            ON snapshot.snapshot_id = active.snapshot_id
+           AND snapshot.owner_id = active.owner_id
+           AND snapshot.status IN ('ready', 'active')
+          JOIN safe_snapshot_memories memory
+            ON memory.snapshot_id = active.snapshot_id
+           AND memory.owner_id = active.owner_id
+          WHERE active.owner_id = ?
+            AND memory.owner_id = ?
+            AND memory.is_active = 1
         ), ranked AS (
           SELECT
             memory_ref,
@@ -120,6 +136,7 @@ export function createMemoryRepository(db) {
 
       const binds = [
         scopedOwnerId,
+        scopedOwnerId,
         ...repeatedPatterns(patterns),
         ...repeatedPatterns(patterns),
         boundedLimit,
@@ -134,13 +151,33 @@ export function createMemoryRepository(db) {
       const scopedOwnerId = assertOwnerId(ownerId);
       const scopedMemoryRef = assertMemoryRef(memoryRef);
       const sql = `
-        SELECT memory_ref, title, category, summary, event_time, revision
-        FROM safe_memories
-        WHERE owner_id = ? AND is_active = 1 AND memory_ref = ?
+        SELECT
+          memory.memory_ref AS memory_ref,
+          memory.title AS title,
+          memory.category AS category,
+          memory.summary AS summary,
+          memory.event_time AS event_time,
+          memory.revision AS revision
+        FROM safe_active_snapshot active
+        JOIN safe_snapshots snapshot
+          ON snapshot.snapshot_id = active.snapshot_id
+         AND snapshot.owner_id = active.owner_id
+         AND snapshot.status IN ('ready', 'active')
+        JOIN safe_snapshot_memories memory
+          ON memory.snapshot_id = active.snapshot_id
+         AND memory.owner_id = active.owner_id
+        WHERE active.owner_id = ?
+          AND memory.owner_id = ?
+          AND memory.is_active = 1
+          AND memory.memory_ref = ?
         LIMIT 1
       `;
 
-      const row = await db.prepare(sql).bind(scopedOwnerId, scopedMemoryRef).first();
+      const row = await db.prepare(sql).bind(
+        scopedOwnerId,
+        scopedOwnerId,
+        scopedMemoryRef,
+      ).first();
       return row ? toPublicMemory(row) : null;
     },
   };
