@@ -33,13 +33,13 @@ const safeRow = {
   is_active: true,
 };
 
-test('audit-safe passes clean approved JSONL and SQL without printing memory text', async () => {
+test('audit-safe passes clean approved JSONL and SQL with generated unix timestamps', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'teddy-audit-'));
   const approved = join(dir, 'approved.jsonl');
   const sqlDir = join(dir, 'sql');
   await mkdir(sqlDir);
   await writeJsonl(approved, [safeRow]);
-  await writeFile(join(sqlDir, '001-safe-memories.sql'), "BEGIN TRANSACTION;\nINSERT INTO safe_memories (id, memory_ref, owner_id, category, title, summary, keywords_json, event_time, revision, source_note, is_active, created_at, updated_at) VALUES ('sm_00000000000000000000000000000001','mem_00000000000000000000000000000001','owner-1','reference','Synthetic robotics reference','A synthetic robotics memory suitable for the public-safe corpus.','[\"robotics\"]',1,1,'historical_chat_summary',1,1,1);\nCOMMIT;\n", 'utf8');
+  await writeFile(join(sqlDir, '001-safe-memories.sql'), "BEGIN TRANSACTION;\nINSERT INTO safe_memories (id, memory_ref, owner_id, category, title, summary, keywords_json, event_time, revision, source_note, is_active, created_at, updated_at) VALUES ('sm_00000000000000000000000000000001','mem_00000000000000000000000000000001','owner-1','reference','Synthetic robotics reference','A synthetic robotics memory suitable for the public-safe corpus.','[\"robotics\"]',1,1,'historical_chat_summary',1,1788000000,1788000000);\nCOMMIT;\n", 'utf8');
 
   const cap = captureIo();
   const code = await main(['audit-safe', '--approved', approved, '--sql-dir', sqlDir], cap.io);
