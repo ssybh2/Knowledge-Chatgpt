@@ -12,7 +12,7 @@ review.jsonl
 approved.jsonl
         ↓ second policy scan + private-ID stripping
 safe D1 SQL export
-        ↓
+        ↓ final audit-safe gate
 `teddy-memory-plugin-safe`
 ```
 
@@ -24,6 +24,7 @@ Important rules:
 - `compile-auto-safe` automatically includes every candidate that passes the deterministic restricted-data policy.
 - Any candidate already carrying a restricted-data reason is excluded automatically.
 - Final title/summary/keywords are scanned again before a record can reach approved output.
+- `audit-safe` validates approved rows again and scans generated SQL for restricted-data reasons and private source-ID markers without printing memory content.
 - Approved records contain no original conversation/message/archive IDs.
 - Never reuse or bind the private D1 `teddy-memory-core` for this track.
 - Manual `compile-approved` remains available as an optional stricter workflow, but it is no longer the default.
@@ -43,8 +44,6 @@ npm run smoke
 ```
 
 ## 1. Build the full local candidate corpus
-
-Use the cleaned archive files:
 
 ```powershell
 node src/cli.js build-candidates `
@@ -68,8 +67,6 @@ The stats command reports counts and blocked-reason totals but never prints mess
 
 ## 2. Automatically compile every safe candidate
 
-No manual CSV selection is required in the default workflow:
-
 ```powershell
 node src/cli.js compile-auto-safe `
   --candidates "work\review.jsonl" `
@@ -88,8 +85,6 @@ candidate is unblocked
   -> private source IDs removed
   -> approved.jsonl
 ```
-
-`compile-auto-safe` reports only aggregate `approved` and `blocked` counts.
 
 Every approved row contains only:
 
@@ -111,8 +106,6 @@ It must not contain `conversation_id`, `message_id`, `archive_id`, `source_archi
 
 ## Optional manual mode
 
-If a future operator wants stricter human curation, the original decision workflow remains available:
-
 ```powershell
 node src/cli.js compile-approved `
   --candidates "work\review.jsonl" `
@@ -120,7 +113,7 @@ node src/cli.js compile-approved `
   --output "work\approved.jsonl"
 ```
 
-This is optional and is not required for Teddy's current automated migration path.
+This is optional and is not required for the current automated migration path.
 
 ## 3. Export safe D1 SQL locally
 
@@ -131,23 +124,27 @@ node src/cli.js export-d1 `
   --batch-size 200
 ```
 
-Before the first Cloudflare upload, run local forbidden-marker checks over generated SQL. At minimum search for:
+## 4. Run the final automatic audit
 
-```text
-Bearer
-password
-sk-
-体检
-诊断
-conversation_id
-message_id
+Before any Cloudflare upload:
+
+```powershell
+node src/cli.js audit-safe `
+  --approved "work\approved.jsonl" `
+  --sql-dir "work\d1"
 ```
 
-If a forbidden marker is found, stop and strengthen the policy before importing that corpus.
+A clean result looks like:
 
-## 4. Create the physically separate Cloudflare D1
+```json
+{"ok":true,"command":"audit-safe","approved_records":4227,"sql_files":22,"validation_errors":0,"restricted_reasons":{},"private_id_markers":{}}
+```
 
-Only after the local policy/export checks:
+If `ok` is false, do not create/import the safe D1. The command reports only aggregate reason/marker names and does not print memory text.
+
+## 5. Create the physically separate Cloudflare D1
+
+Only after `audit-safe` returns `ok: true`:
 
 ```powershell
 npx wrangler d1 create teddy-memory-plugin-safe
@@ -176,6 +173,7 @@ node src/cli.js build-candidates --messages <path> [--conversations <path>] --ow
 node src/cli.js compile-auto-safe --candidates <review.jsonl> --output <approved.jsonl>
 node src/cli.js compile-approved --candidates <review.jsonl> --decisions <decisions.jsonl> --output <approved.jsonl>
 node src/cli.js export-d1 --approved <approved.jsonl> --out-dir <dir> [--batch-size <n>]
+node src/cli.js audit-safe --approved <approved.jsonl> --sql-dir <dir>
 node src/cli.js stats --file <jsonl>
 ```
 
@@ -187,12 +185,13 @@ The tracked fixtures are synthetic only. Tests verify that:
 - real `is_retrievable: 1/0` values are normalized correctly;
 - blank/invalid message rows are skipped and counted without exposing content;
 - credential, payment, health/PHI, authentication-record, precise-contact and raw-attachment patterns are blocked conservatively;
+- long opaque numeric IDs are not misclassified as payment/contact data;
 - automatic mode includes all unblocked candidates and excludes blocked candidates;
 - final approved text is scanned again;
 - approved output strips private source IDs;
 - public `memory_ref` values are opaque;
 - SQL export is idempotent and batchable;
-- synthetic restricted text never reaches exported SQL.
+- the final audit fails on restricted SQL/private source-ID markers without printing memory content.
 
 ## Next milestone
 
