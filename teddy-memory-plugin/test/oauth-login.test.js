@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  browserLaunchSpec,
   buildAuthorizationUrl,
   codeChallengeForVerifier,
   exchangeAuthorizationCode,
@@ -41,6 +42,16 @@ test('authorization URL uses code flow, PKCE S256, resource binding, and read-on
   assert.equal(url.searchParams.get('code_challenge'), 'challenge-value');
   assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
   assert.equal(url.searchParams.has('client_secret'), false);
+});
+
+test('Windows browser launcher bypasses cmd.exe so ampersands stay inside the OAuth URL', () => {
+  const url = 'https://tenant.example.auth0.com/authorize?response_type=code&client_id=public-client-id&scope=memory%3Aread';
+  const spec = browserLaunchSpec('win32', url);
+
+  assert.equal(spec.command.toLowerCase(), 'rundll32.exe');
+  assert.deepEqual(spec.args, ['url.dll,FileProtocolHandler', url]);
+  assert.equal(spec.args.includes('/c'), false);
+  assert.equal(spec.args.some((arg) => arg === 'cmd.exe'), false);
 });
 
 test('callback validation requires exact state and authorization code', () => {
