@@ -149,19 +149,22 @@ function validateLoopbackRedirect(value) {
   return url;
 }
 
-function openBrowser(url) {
-  let command;
-  let args;
-  if (process.platform === 'win32') {
-    command = 'cmd.exe';
-    args = ['/c', 'start', '', url];
-  } else if (process.platform === 'darwin') {
-    command = 'open';
-    args = [url];
-  } else {
-    command = 'xdg-open';
-    args = [url];
+export function browserLaunchSpec(platform, url) {
+  const target = requiredText(url, 'browser URL');
+  if (platform === 'win32') {
+    return {
+      command: 'rundll32.exe',
+      args: ['url.dll,FileProtocolHandler', target],
+    };
   }
+  if (platform === 'darwin') {
+    return { command: 'open', args: [target] };
+  }
+  return { command: 'xdg-open', args: [target] };
+}
+
+function openBrowser(url) {
+  const { command, args } = browserLaunchSpec(process.platform, url);
   const child = spawn(command, args, { detached: true, stdio: 'ignore' });
   child.unref();
 }
