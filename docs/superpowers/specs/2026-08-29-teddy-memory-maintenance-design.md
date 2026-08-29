@@ -175,9 +175,9 @@ Requirements:
 6. The normal maintenance path never exposes a destructive delete option.
 7. After update, the read-only `/v1/verify-migration` and `/v1/status` checks must match the expected aggregate model.
 
-If the existing private migration helper is not tracked in this repository, Plan 4 implementation must bring an equivalent tested importer into `teddy-memory-maintenance` only after proving its generated identities match the current production snapshot. Until that proof passes, private production writes remain disabled.
+If the existing private migration helper is not tracked in this repository, Plan 4 implementation must bring an equivalent tested importer into `teddy-memory-maintenance` only after proving its generated archive-ID set is compatible with the current production snapshot. Until that proof passes, private production writes remain disabled.
 
-## 8. Plugin-Safe rebuild semantics
+## 8. Plugin-Safe rebuild and merge semantics
 
 Safe Corpus is rebuilt locally from the entire normalized export on every changed run using the existing `teddy-memory-safe` pipeline:
 
@@ -197,52 +197,92 @@ promotion candidate
 
 The Safe Corpus build remains deterministic. Existing stable candidate IDs/public memory refs must continue to derive from the current source identity semantics so reruns update the same public memories rather than duplicating them.
 
-When a source message is present in the new export but is now blocked by policy, the maintenance system may deactivate the corresponding existing public memory. When a source message is simply absent from the export, the system retains the previously active safe memory unless an explicit future deletion policy is introduced.
+To preserve old safe memories when one OpenAI export unexpectedly omits source records, each new publishable snapshot is built as a conservative merge, not as a blind replacement:
+
+```text
+current active public safe rows
+        ↓ baseline
+new approved rows
+        ↓ overlay by memory_ref
+source messages that are PRESENT but no longer eligible / now blocked
+        ↓ remove their deterministic memory_ref from candidate snapshot
+source messages that are ABSENT from this export
+        ↓ leave baseline row unchanged
+```
+
+The Safe package therefore needs one shared deterministic helper that can derive the same public `memory_ref` from the stable source identity even when the message is now blocked, too short, non-retrievable, or otherwise fails candidate construction. The helper must reuse the existing candidate/ref derivation algorithm; it must not expose the source identity in the public row.
+
+This makes the distinction explicit:
+
+- present + newly blocked/ineligible => may deactivate/remove from the new active safe snapshot;
+- absent from export => retain the previously active public row;
+- present + approved => insert/update the deterministic public row.
 
 ## 9. Atomic safe-memory publication
 
-Plan 4 should strengthen recurring updates by introducing versioned safe snapshots rather than rewriting the live query set in place.
+Plan 4 strengthens recurring updates by introducing versioned safe snapshots rather than rewriting the live query set in place.
 
 Add a snapshot model to the independent safe D1:
 
 ```text
 safe_snapshots
-- snapshot_id
-- owner_id
-- created_at
-- source_digest
-- record_count
-- status        # loading | ready | active | retired
+- snapshot_id TEXT PRIMARY KEY
+- owner_id TEXT NOT NULL
+- created_at INTEGER NOT NULL
+- safe_content_digest TEXT NOT NULL
+- record_count INTEGER NOT NULL
+- status TEXT NOT NULL          # loading | ready | active | retired | failed
 
 safe_snapshot_memories
-- snapshot_id
-- memory_ref
-- public DTO fields...
+- snapshot_id TEXT NOT NULL
+- memory_ref TEXT NOT NULL
+- id TEXT NOT NULL
+- owner_id TEXT NOT NULL
+- category TEXT NOT NULL
+- title TEXT NOT NULL
+- summary TEXT NOT NULL
+- keywords_json TEXT NOT NULL
+- event_time REAL
+- revision INTEGER NOT NULL
+- source_note TEXT NOT NULL
+- is_active INTEGER NOT NULL
+- created_at INTEGER NOT NULL
+- updated_at INTEGER NOT NULL
+PRIMARY KEY (snapshot_id, memory_ref)
 
 safe_active_snapshot
-- owner_id PRIMARY KEY
-- snapshot_id
+- owner_id TEXT PRIMARY KEY
+- snapshot_id TEXT NOT NULL
+- updated_at INTEGER NOT NULL
 ```
+
+Indexes must support `snapshot_id + owner_id`, category, event-time ordering, and exact `memory_ref` lookup.
+
+`safe_content_digest` is computed only from canonicalized public-safe rows. The raw OpenAI ZIP SHA-256 remains local-only and is never written to the safe D1.
 
 Publication flow:
 
 ```text
 create loading snapshot
  ↓
-load all approved rows for new snapshot
+load merged public-safe candidate rows
  ↓
-validate count + policy/audit invariants
+validate row count + digest + policy/audit invariants
  ↓
-mark ready
+mark snapshot ready
  ↓
-atomically switch owner active_snapshot pointer
+change one safe_active_snapshot row for owner
+ ↓
+Worker immediately reads the new snapshot
  ↓
 post-cutover live smoke
  ↓
-mark previous snapshot retired
+mark new snapshot active and previous snapshot retired
 ```
 
-The Worker query repository is updated to read only the active snapshot for the resolved owner. This gives a tiny atomic cutover surface: a failed load never changes the active pointer.
+The active cutover itself is one owner-scoped pointer update, so a failed bulk load cannot alter the live query set. If the post-cutover smoke fails, rollback is another single pointer update to the previously active snapshot.
+
+The Worker query repository is updated to require the resolved owner's active snapshot and then scope all safe-memory reads by both `snapshot_id` and `owner_id`.
 
 The existing `oauth_principals` table stays independent and is never rebuilt, dropped, copied into work files, or included in safe-memory content migrations.
 
@@ -250,9 +290,9 @@ A compatibility migration must seed the currently active 4,227 safe memories as 
 
 ## 10. Rollback behavior
 
-Every publication records the previous active snapshot ID. If post-cutover verification fails, the maintenance command flips `safe_active_snapshot` back to the previous snapshot and reports the failed run.
+Every publication records the previous active snapshot ID in local run state before cutover. If post-cutover verification fails, the maintenance command flips `safe_active_snapshot` back to the previous snapshot and reports the failed run.
 
-Old snapshots are retained for at least the two most recent successful maintenance runs. Cleanup is explicit and never part of the same transaction as publication.
+Old snapshots are retained for at least the two most recent successful maintenance runs. Cleanup is explicit and never part of the same operation as publication.
 
 The Cloudflare Worker deployment itself should not normally change during twice-monthly data refreshes. Runtime code is deployed only when compatibility or schema code changes.
 
@@ -346,8 +386,10 @@ Tracked tests use synthetic fixtures only and cover:
 - suspicious regression gate;
 - idempotent same-ZIP handling;
 - private import dry-run and no-delete semantics;
+- private archive-ID compatibility proof before writes;
 - Safe Corpus orchestration against synthetic fixtures;
-- blocked-now vs absent-now distinction;
+- deterministic ref derivation even for present-but-now-ineligible messages;
+- blocked-now vs absent-now conservative merge behavior;
 - snapshot loading, validation, pointer cutover, rollback, and retention;
 - preservation of `oauth_principals` across safe updates;
 - redacted aggregate reporting;
@@ -358,7 +400,7 @@ Tracked tests use synthetic fixtures only and cover:
 Real production verification gates after implementation:
 
 1. dry-run on the current known export;
-2. prove private importer identity compatibility against current deployed counts without writing;
+2. prove private importer identity compatibility against current deployed archive IDs/counts without writing;
 3. seed snapshot tables from the current 4,227 safe records;
 4. verify Worker behavior against the seeded active snapshot;
 5. perform one no-change maintenance run;
@@ -386,6 +428,7 @@ Plan 4 maintenance is complete when all of the following are true:
 - suspicious exports cannot reach production writes;
 - private memory update is additive/upsert and verified against the existing archive identity model;
 - safe corpus is rebuilt through the existing safety policy;
+- absent-source rows are conservatively retained while present-but-now-blocked rows can be removed;
 - safe publication uses versioned snapshots with atomic active-pointer cutover and rollback;
 - `oauth_principals` survives refreshes unchanged;
 - dry-run reports planned changes without writes;
