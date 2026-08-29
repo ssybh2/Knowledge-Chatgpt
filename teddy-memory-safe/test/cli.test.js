@@ -47,6 +47,26 @@ test('build-candidates skips assistant/non-retrievable and supports max-candidat
   assert.match(cap.stdout, /"candidates":1/);
 });
 
+test('build-candidates accepts is_retrievable and safely skips invalid content rows', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'teddy-cli-real-'));
+  const messages = join(dir, 'messages.jsonl');
+  const output = join(dir, 'review.jsonl');
+  await writeJsonl(messages, [
+    { id: 'c1::blank', conversation_id: 'c1', role: 'user', content: '   ', content_type: 'multimodal_text', is_retrievable: 1 },
+    { id: 'c1::valid', conversation_id: 'c1', role: 'user', content: '这是一条足够长的真实格式 EtherCAT 技术项目记录，用于验证安全候选生成。', is_retrievable: 1 },
+    { id: 'c1::hidden', conversation_id: 'c1', role: 'user', content: '这条真实格式消息虽然足够长，但不可检索，因此不应该生成候选。', is_retrievable: 0 },
+  ]);
+  const cap = captureIo();
+  const code = await main(['build-candidates', '--messages', messages, '--owner', 'owner-1', '--output', output], cap.io);
+  assert.equal(code, 0);
+  const rows = await collect(output);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].source_archive_id, 'c1::valid');
+  assert.match(cap.stdout, /"invalid_messages":1/);
+  assert.match(cap.stdout, /"candidates":1/);
+  assert.ok(!cap.stdout.includes('EtherCAT 技术项目记录'));
+});
+
 test('build-candidates without owner returns non-zero without echoing source content', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'teddy-cli-'));
   const { messages } = await makeSource(dir);
