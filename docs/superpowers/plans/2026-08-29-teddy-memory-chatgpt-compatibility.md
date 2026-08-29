@@ -27,11 +27,11 @@
 - Create `teddy-memory-plugin/src/compatibility.js` — pure compatibility checks with injectable `fetchImpl`; no browser/UI logic.
 - Create `teddy-memory-plugin/scripts/chatgpt-compat.mjs` — interactive CLI that obtains a PKCE token, refreshes it once, runs the compatibility checks, and prints a redacted matrix.
 - Modify `teddy-memory-plugin/scripts/oauth-login.mjs` — extract reusable token acquisition and refresh functions while preserving existing `oauth:login` behavior.
-- Modify `teddy-memory-plugin/scripts/live-smoke.mjs` — export small MCP transport helpers needed by the compatibility lab without changing current report behavior.
+- Modify `teddy-memory-plugin/scripts/live-smoke.mjs` — export the existing MCP POST helper without changing its implementation/report behavior.
 - Modify `teddy-memory-plugin/package.json` — add `compat:chatgpt` and include the new script in `smoke` syntax/import checks.
 - Create `teddy-memory-plugin/test/compatibility.test.js` — mocked protocol tests.
 - Modify `teddy-memory-plugin/test/oauth-login.test.js` — token acquisition/refresh regression tests.
-- Modify `teddy-memory-plugin/test/live-smoke.test.js` only if helper exports require regression coverage.
+- Modify `teddy-memory-plugin/test/live-smoke.test.js` — regression coverage that exporting `postMcp` does not alter live-smoke behavior.
 
 ### Task 1: Refactor PKCE token acquisition into a reusable, non-leaking interface
 
@@ -52,9 +52,7 @@ Add tests that assert refresh uses only public-client fields and never sends a C
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
 
-import {
-  refreshOAuthTokens,
-} from '../scripts/oauth-login.mjs';
+import { refreshOAuthTokens } from '../scripts/oauth-login.mjs';
 
 test('refreshOAuthTokens uses public-client refresh grant with resource binding', async () => {
   let request;
@@ -84,29 +82,81 @@ test('refreshOAuthTokens uses public-client refresh grant with resource binding'
 });
 ```
 
-Also add a test where Auth0 rotates only the access token and omits a new refresh token; the helper must retain the previous refresh token rather than fail.
+Add a second test where Auth0 omits a new refresh token and assert the helper retains `old-refresh`.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
-
-Run:
 
 ```powershell
 cd teddy-memory-plugin
 node --test test/oauth-login.test.js
 ```
 
-Expected: FAIL because `refreshOAuthTokens` and/or `obtainOAuthTokens` are not exported yet.
+Expected: FAIL because `refreshOAuthTokens` and `obtainOAuthTokens` are not exported yet.
 
 - [ ] **Step 3: Implement minimal reusable token helpers**
 
-Refactor the existing callback + code exchange path so `runOAuthLogin` delegates to:
+Make browser opening injectable by changing the callback waiter to:
 
 ```js
-export async function obtainOAuthTokens(options = {}) {
-  // validate inputs, generate state/verifier/challenge, open browser,
-  // wait for callback, exchange code, return tokens only to caller.
+async function waitForCallback({
+  redirectUri,
+  expectedState,
+  authorizationUrl,
+  openBrowserImpl = openBrowser,
+}) {
+  // existing server/callback logic stays unchanged
+  // replace openBrowser(authorizationUrl) with:
+  openBrowserImpl(authorizationUrl);
 }
+```
 
+Extract the existing state/verifier/challenge/callback/exchange sequence into:
+
+```js
+export async function obtainOAuthTokens({
+  issuer,
+  clientId,
+  resource,
+  redirectUri = DEFAULT_REDIRECT_URI,
+  fetchImpl = fetch,
+  openBrowserImpl = openBrowser,
+} = {}) {
+  const normalizedIssuer = normalizeIssuer(issuer);
+  const normalizedClientId = requiredText(clientId, 'Auth0 client ID');
+  const normalizedResource = normalizeResource(resource);
+  const normalizedRedirectUri = validateLoopbackRedirect(redirectUri).toString();
+  const state = base64UrlRandom(24);
+  const codeVerifier = base64UrlRandom(48);
+  const codeChallenge = await codeChallengeForVerifier(codeVerifier);
+  const authorizationUrl = buildAuthorizationUrl({
+    issuer: normalizedIssuer,
+    clientId: normalizedClientId,
+    redirectUri: normalizedRedirectUri,
+    resource: normalizedResource,
+    state,
+    codeChallenge,
+  });
+  const code = await waitForCallback({
+    redirectUri: normalizedRedirectUri,
+    expectedState: state,
+    authorizationUrl,
+    openBrowserImpl,
+  });
+  return exchangeAuthorizationCode({
+    issuer: normalizedIssuer,
+    clientId: normalizedClientId,
+    redirectUri: normalizedRedirectUri,
+    resource: normalizedResource,
+    code,
+    codeVerifier,
+    fetchImpl,
+  });
+}
+```
+
+Add refresh:
+
+```js
 export async function refreshOAuthTokens({
   issuer,
   clientId,
@@ -142,8 +192,6 @@ Keep `runOAuthLogin` behavior unchanged by calling `obtainOAuthTokens(...)` and 
 
 - [ ] **Step 4: Run focused and full plugin tests**
 
-Run:
-
 ```powershell
 node --test test/oauth-login.test.js
 npm test
@@ -176,24 +224,27 @@ Use a route-aware fake fetch and assert both protected-resource paths are accept
 
 ```js
 test('protected-resource metadata is canonical at both discovery paths', async () => {
-  const fetchImpl = fakeFetch({
-    'https://memory.example.com/.well-known/oauth-protected-resource': json(200, {
-      resource: 'https://memory.example.com/mcp',
-      authorization_servers: ['https://tenant.example.com/'],
-      scopes_supported: ['memory:read'],
-    }),
-    'https://memory.example.com/.well-known/oauth-protected-resource/mcp': json(200, {
-      resource: 'https://memory.example.com/mcp',
-      authorization_servers: ['https://tenant.example.com/'],
-      scopes_supported: ['memory:read'],
-    }),
-  });
+  const responseBody = {
+    resource: 'https://memory.example.com/mcp',
+    authorization_servers: ['https://tenant.example.com/'],
+    scopes_supported: ['memory:read'],
+  };
+  const fetchImpl = async (url) => {
+    const pathname = new URL(url).pathname;
+    if (pathname === '/.well-known/oauth-protected-resource'
+      || pathname === '/.well-known/oauth-protected-resource/mcp') {
+      return new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    throw new Error(`unexpected URL: ${url}`);
+  };
 
   const result = await checkProtectedResource({
     baseUrl: 'https://memory.example.com',
     fetchImpl,
   });
-
   assert.equal(result.resource, 'https://memory.example.com/mcp');
   assert.equal(result.issuer, 'https://tenant.example.com/');
   assert.equal(result.requiredScope, 'memory:read');
@@ -212,21 +263,23 @@ Expected: FAIL because `src/compatibility.js` does not exist.
 
 - [ ] **Step 3: Implement the discovery checks**
 
-Implement strict helpers that return booleans/normalized public URLs only. Auth server discovery uses:
-
-```text
-<issuer>.well-known/openid-configuration
-```
-
-and requires:
+Implement strict helpers that return booleans/normalized public URLs only. Build the OIDC discovery URL with:
 
 ```js
-metadata.authorization_endpoint
-metadata.token_endpoint
-metadata.code_challenge_methods_supported.includes('S256')
+const discoveryUrl = new URL('.well-known/openid-configuration', issuer).toString();
 ```
 
-`supportsOfflineAccess` is true only when `scopes_supported` includes `offline_access`; absence is reported as a compatibility failure for the real Auth0 configuration, but never changes the Worker's protected-resource scope list.
+Require:
+
+```js
+if (!metadata.authorization_endpoint) throw new Error('authorization endpoint missing');
+if (!metadata.token_endpoint) throw new Error('token endpoint missing');
+if (!metadata.code_challenge_methods_supported?.includes('S256')) {
+  throw new Error('PKCE S256 is not supported');
+}
+```
+
+`supportsOfflineAccess` is true only when `scopes_supported` includes `offline_access`; absence is a compatibility failure for the real Auth0 configuration but never changes the Worker's protected-resource scope list.
 
 - [ ] **Step 4: Run focused tests**
 
@@ -243,21 +296,21 @@ git add teddy-memory-plugin/src/compatibility.js teddy-memory-plugin/test/compat
 git commit -m "feat: add oauth discovery compatibility checks"
 ```
 
-### Task 3: Export safe MCP transport helpers and validate tool contracts
+### Task 3: Export the existing MCP transport helper and validate tool contracts
 
 **Files:**
 - Modify: `teddy-memory-plugin/scripts/live-smoke.mjs`
 - Modify: `teddy-memory-plugin/src/compatibility.js`
 - Modify: `teddy-memory-plugin/test/compatibility.test.js`
-- Modify: `teddy-memory-plugin/test/live-smoke.test.js` if necessary
+- Modify: `teddy-memory-plugin/test/live-smoke.test.js`
 
 **Interfaces:**
-- Produces from `live-smoke.mjs`: `postMcp({ baseUrl, token, body, fetchImpl }) -> Promise<object>`
-- Produces from `compatibility.js`: `checkAuthenticatedMcp({ baseUrl, token, fetchImpl }) -> Promise<{ toolCount: 3, searchResultCount: number }>`
+- Produces from `live-smoke.mjs`: `postMcp({ baseUrl, token, body, fetchImpl }) -> Promise<object>`.
+- Produces from `compatibility.js`: `checkAuthenticatedMcp({ baseUrl, token, fetchImpl }) -> Promise<{ toolCount: 3, searchResultCount: number }>`.
 
 - [ ] **Step 1: Write failing tests for exact tool names, annotations, and bounded schemas**
 
-The compatibility test must reject any tool set other than:
+Reject any tool set other than:
 
 ```js
 const EXPECTED = ['get_context', 'get_memory_item', 'search_memory'];
@@ -272,7 +325,13 @@ assert.equal(tool.annotations?.openWorldHint, false);
 assert.equal(tool.inputSchema?.type, 'object');
 ```
 
-Also assert known limits are represented in schema where applicable: `get_context.max_items <= 12`, `search_memory.limit <= 20`, and `get_memory_item.memory_ref` is required.
+For the actual current schemas in `src/server.js`, assert:
+
+```js
+assert.equal(getContext.inputSchema.properties.limit.maximum, 12);
+assert.equal(searchMemory.inputSchema.properties.limit.maximum, 20);
+assert.equal(getMemoryItem.inputSchema.required.includes('memory_ref'), true);
+```
 
 Add a restricted-query fixture that calls `search_memory` with a credential-seeking query and asserts the tool fails closed without returning a memory array or private fields.
 
@@ -286,15 +345,19 @@ Expected: FAIL because authenticated MCP contract validation is not implemented/
 
 - [ ] **Step 3: Export `postMcp` and implement authenticated checks**
 
-Change only the export boundary in `live-smoke.mjs`:
+In `live-smoke.mjs`, change only:
+
+```js
+async function postMcp({ baseUrl, token, body, fetchImpl }) {
+```
+
+to:
 
 ```js
 export async function postMcp({ baseUrl, token, body, fetchImpl }) {
-  // existing implementation unchanged
-}
 ```
 
-Implement `checkAuthenticatedMcp` by sending `initialize`, `tools/list`, one benign technical `search_memory` call, one neutral unknown-ref call, and one restricted-query call. Inspect only aggregate count and schema/annotation metadata; never print memory rows.
+Do not alter the helper body. Implement `checkAuthenticatedMcp` by sending `initialize`, `tools/list`, one benign technical `search_memory` call, one neutral unknown-ref call, and one restricted-query call. Inspect only aggregate count and schema/annotation metadata; never print memory rows.
 
 - [ ] **Step 4: Run full plugin tests**
 
@@ -320,28 +383,33 @@ git commit -m "feat: validate mcp compatibility contracts"
 - Modify: `teddy-memory-plugin/test/compatibility.test.js`
 
 **Interfaces:**
-- Produces: `runChatGptCompatibility({ issuer, clientId, baseUrl, resource, redirectUri, fetchImpl, tokenProvider, refreshProvider, write }) -> Promise<CompatibilityReport>`
+- Produces: `runChatGptCompatibility({ issuer, clientId, baseUrl, resource, redirectUri, fetchImpl, tokenProvider, refreshProvider, write }) -> Promise<CompatibilityReport>`.
 - `CompatibilityReport` contains check names/booleans and aggregate tool/search counts only.
 
 - [ ] **Step 1: Write failing report/redaction tests**
 
-Test that a fake token provider can return recognizable secret strings and none reach `write`:
+Create one successful fake `fetchImpl` that returns OIDC/protected-resource metadata and dispatches `/mcp` responses by JSON-RPC method. Then inject recognizable secret strings from token providers:
 
 ```js
-test('compatibility report never prints oauth tokens or memory content', async () => {
-  const lines = [];
-  const report = await runChatGptCompatibility({
-    // mocked discovery/MCP fetch
-    tokenProvider: async () => ({ accessToken: 'ACCESS_SECRET', refreshToken: 'REFRESH_SECRET' }),
-    refreshProvider: async () => ({ accessToken: 'ACCESS_SECRET_2', refreshToken: 'REFRESH_SECRET_2' }),
-    write: (line) => lines.push(String(line)),
-  });
-  assert.equal(report.ok, true);
-  const output = lines.join('\n');
-  assert.equal(output.includes('ACCESS_SECRET'), false);
-  assert.equal(output.includes('REFRESH_SECRET'), false);
+const lines = [];
+const report = await runChatGptCompatibility({
+  issuer: 'https://tenant.example.com/',
+  clientId: 'public-client',
+  baseUrl: 'https://memory.example.com',
+  resource: 'https://memory.example.com/mcp',
+  redirectUri: 'http://localhost:8789/callback',
+  fetchImpl,
+  tokenProvider: async () => ({ accessToken: 'ACCESS_SECRET', refreshToken: 'REFRESH_SECRET' }),
+  refreshProvider: async () => ({ accessToken: 'ACCESS_SECRET_2', refreshToken: 'REFRESH_SECRET_2' }),
+  write: (line) => lines.push(String(line)),
 });
+assert.equal(report.ok, true);
+const output = lines.join('\n');
+assert.equal(output.includes('ACCESS_SECRET'), false);
+assert.equal(output.includes('REFRESH_SECRET'), false);
 ```
+
+The fake MCP search payload must contain a sentinel summary such as `MEMORY_CONTENT_SENTINEL`; assert that sentinel is also absent from output.
 
 - [ ] **Step 2: Run test and verify RED**
 
@@ -349,7 +417,7 @@ test('compatibility report never prints oauth tokens or memory content', async (
 node --test test/compatibility.test.js
 ```
 
-Expected: FAIL because `runChatGptCompatibility` / CLI do not exist.
+Expected: FAIL because `runChatGptCompatibility` and the CLI do not exist.
 
 - [ ] **Step 3: Implement CLI orchestration**
 
@@ -360,21 +428,7 @@ Expected: FAIL because `runChatGptCompatibility` / CLI do not exist.
 3. call `obtainOAuthTokens` interactively;
 4. call `refreshOAuthTokens` once to prove refresh capability/rotation;
 5. run authenticated MCP contract checks with the refreshed access token;
-6. print a matrix like:
-
-```text
-PASS protected_resource_metadata
-PASS auth0_discovery
-PASS pkce_s256
-PASS refresh_token
-PASS anonymous_mcp_challenge
-PASS mcp_initialize
-PASS tools_list
-PASS tool_annotations
-PASS restricted_query_guard
-PASS safe_search
-RESULT 18/18 PASS
-```
+6. print a deterministic check matrix ending with `RESULT 18/18 PASS` when all 18 checks pass.
 
 Do not print URLs containing OAuth query parameters, tokens, tool content, titles, summaries, or refs returned by search.
 
@@ -406,7 +460,8 @@ git commit -m "feat: add chatgpt compatibility lab"
 ### Task 5: Run real public compatibility verification without ChatGPT account linking
 
 **Files:**
-- Modify only if real protocol evidence exposes a server/config incompatibility; otherwise no code changes.
+- Modify: `teddy-memory-plugin/README.md`
+- Modify: `teddy-memory-plugin/docs/AUTH0_RUNBOOK.md`
 
 **Interfaces:**
 - Consumes environment variables already used by `oauth:login`: `TEDDY_AUTH0_ISSUER`, `TEDDY_AUTH0_CLIENT_ID`, `TEDDY_PLUGIN_URL`, `TEDDY_PLUGIN_RESOURCE`, `TEDDY_AUTH0_REDIRECT_URI`.
@@ -421,9 +476,9 @@ npm run compat:chatgpt
 
 Expected: browser Auth0 login, then aggregate `18/18 PASS` with no token/memory output.
 
-- [ ] **Step 2: If a protocol check fails, reproduce it with the focused mocked test before changing code**
+- [ ] **Step 2: Treat any protocol failure as a new RED test, not an ad-hoc production edit**
 
-For each real failure, add a synthetic regression test representing the exact malformed/unsupported response, run it RED, then implement the smallest server/client fix and rerun GREEN.
+If a check fails, stop the acceptance run. Add a synthetic test to `test/compatibility.test.js` reproducing the exact public metadata/MCP response shape, verify RED, implement the smallest fix in the already-listed compatibility/plugin files, then rerun the automated gates before repeating the real command.
 
 - [ ] **Step 3: Re-run all gates**
 
@@ -436,11 +491,11 @@ npm run compat:chatgpt
 
 Expected: automated gates PASS and real compatibility matrix PASS.
 
-- [ ] **Step 4: Record evidence in PR description/runbook without secrets**
+- [ ] **Step 4: Record evidence without secrets**
 
-Update the maintenance PR description with only aggregate compatibility status and date. Do not paste authorization URLs, callback URLs containing codes, tokens, or Auth0 subject data.
+Update README/runbook with the date and aggregate compatibility result only. Do not paste authorization URLs, callback URLs containing codes, tokens, Auth0 subject data, or memory content.
 
-- [ ] **Step 5: Commit documentation only if changed**
+- [ ] **Step 5: Commit documentation**
 
 ```bash
 git add teddy-memory-plugin/README.md teddy-memory-plugin/docs/AUTH0_RUNBOOK.md
