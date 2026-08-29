@@ -13,6 +13,14 @@ function safeStartupError() {
   });
 }
 
+function backendServiceFetch(env) {
+  const service = env.TEDDY_MEMORY_API;
+  if (!service || typeof service.fetch !== 'function') {
+    throw new Error('TEDDY_MEMORY_API service binding is required');
+  }
+  return service.fetch.bind(service);
+}
+
 export function createWorkerFetch({
   createClient = createMemoryClient,
   createHttpHandler = createTeddyMemoryHttpHandler,
@@ -29,7 +37,10 @@ export function createWorkerFetch({
       env,
       mcpFetch: async (incoming) => {
         try {
-          const config = readConfig(env);
+          const config = {
+            ...readConfig(env),
+            fetchImpl: backendServiceFetch(env),
+          };
           const client = createClient(config);
           const handler = createHttpHandler(client);
           return handler.fetch(incoming);
