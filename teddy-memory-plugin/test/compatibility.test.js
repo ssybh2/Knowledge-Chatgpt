@@ -202,3 +202,163 @@ test('anonymous MCP challenge fails when resource metadata or scope is missing',
     );
   }
 });
+
+function toolContracts({ badAnnotation = false } = {}) {
+  const readOnly = {
+    readOnlyHint: true,
+    destructiveHint: false,
+    openWorldHint: false,
+  };
+  return [
+    {
+      name: 'get_context',
+      annotations: badAnnotation ? { ...readOnly, destructiveHint: true } : readOnly,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          keywords: { type: 'array' },
+          limit: { type: 'integer', minimum: 1, maximum: 12, default: 6 },
+        },
+      },
+    },
+    {
+      name: 'search_memory',
+      annotations: readOnly,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          keywords: { type: 'array' },
+          limit: { type: 'integer', minimum: 1, maximum: 20, default: 8 },
+        },
+      },
+    },
+    {
+      name: 'get_memory_item',
+      annotations: readOnly,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          memory_ref: { type: 'string', pattern: '^mem_[0-9a-f]{32}$' },
+        },
+        required: ['memory_ref'],
+      },
+    },
+  ];
+}
+
+function authenticatedMcpFetch({ badAnnotation = false } = {}) {
+  const calls = [];
+  const fetchImpl = async (input, init = {}) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    assert.equal(request.url, resource);
+    assert.equal(request.method, 'POST');
+    assert.equal(request.headers.get('authorization'), 'Bearer ACCESS_TOKEN_DO_NOT_PRINT');
+    const body = await request.json();
+    calls.push(body);
+
+    if (body.method === 'initialize') {
+      return json(200, {
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          protocolVersion: '2025-06-18',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'teddy-memory-plugin', version: '0.1.0' },
+        },
+      });
+    }
+
+    if (body.method === 'tools/list') {
+      return json(200, {
+        jsonrpc: '2.0',
+        id: body.id,
+        result: { tools: toolContracts({ badAnnotation }) },
+      });
+    }
+
+    if (body.method === 'tools/call' && body.params?.name === 'search_memory') {
+      if (String(body.params.arguments?.query || '').toLowerCase().includes('api key')) {
+        return json(200, {
+          jsonrpc: '2.0',
+          id: body.id,
+          result: {
+            isError: true,
+            content: [{ type: 'text', text: 'This category is unavailable through Plugin-safe memory' }],
+          },
+        });
+      }
+      return json(200, {
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          structuredContent: {
+            memories: [{
+              memory_ref: 'mem_11111111111111111111111111111111',
+              title: 'MEMORY_CONTENT_SENTINEL',
+              category: 'reference',
+              summary: 'MEMORY_SUMMARY_SENTINEL',
+              revision: 1,
+            }],
+          },
+        },
+      });
+    }
+
+    if (body.method === 'tools/call' && body.params?.name === 'get_memory_item') {
+      return json(200, {
+        jsonrpc: '2.0',
+        id: body.id,
+        result: { structuredContent: { memory: null } },
+      });
+    }
+
+    return json(500, { error: 'unexpected fake MCP request' });
+  };
+  return { calls, fetchImpl };
+}
+
+test('authenticated MCP compatibility validates exact tools, read-only schemas, benign search, unknown ref, and restricted guard', async () => {
+  const { checkAuthenticatedMcp } = await loadCompatibility();
+  assert.equal(typeof checkAuthenticatedMcp, 'function');
+  const fake = authenticatedMcpFetch();
+
+  const result = await checkAuthenticatedMcp({
+    baseUrl,
+    token: 'ACCESS_TOKEN_DO_NOT_PRINT',
+    fetchImpl: fake.fetchImpl,
+  });
+
+  assert.deepEqual(result, { toolCount: 3, searchResultCount: 1 });
+  assert.deepEqual(
+    fake.calls.map((body) => [body.method, body.params?.name || null]),
+    [
+      ['initialize', null],
+      ['tools/list', null],
+      ['tools/call', 'search_memory'],
+      ['tools/call', 'get_memory_item'],
+      ['tools/call', 'search_memory'],
+    ],
+  );
+  assert.equal(JSON.stringify(result).includes('MEMORY_CONTENT_SENTINEL'), false);
+  assert.equal(JSON.stringify(result).includes('ACCESS_TOKEN_DO_NOT_PRINT'), false);
+});
+
+test('authenticated MCP compatibility rejects destructive or non-read-only tool annotations', async () => {
+  const { checkAuthenticatedMcp } = await loadCompatibility();
+  const fake = authenticatedMcpFetch({ badAnnotation: true });
+
+  await assert.rejects(
+    checkAuthenticatedMcp({
+      baseUrl,
+      token: 'ACCESS_TOKEN_DO_NOT_PRINT',
+      fetchImpl: fake.fetchImpl,
+    }),
+    /annotation|read.only|destructive/i,
+  );
+  assert.deepEqual(
+    fake.calls.map((body) => body.method),
+    ['initialize', 'tools/list'],
+  );
+});
