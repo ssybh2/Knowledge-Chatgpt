@@ -10,7 +10,15 @@ function jsonResponse(body, status = 200) {
   });
 }
 
-function fakeFetch() {
+const defaultSearchMemories = [{
+  memory_ref: 'mem_11111111111111111111111111111111',
+  title: 'DO_NOT_PRINT_TITLE',
+  category: 'reference',
+  summary: 'DO_NOT_PRINT_SUMMARY',
+  revision: 1,
+}];
+
+function fakeFetch({ searchMemories = defaultSearchMemories } = {}) {
   const calls = [];
 
   async function fetchImpl(input, init = {}) {
@@ -60,15 +68,7 @@ function fakeFetch() {
         jsonrpc: '2.0',
         id: body.id,
         result: {
-          structuredContent: {
-            memories: [{
-              memory_ref: 'mem_11111111111111111111111111111111',
-              title: 'DO_NOT_PRINT_TITLE',
-              category: 'reference',
-              summary: 'DO_NOT_PRINT_SUMMARY',
-              revision: 1,
-            }],
-          },
+          structuredContent: { memories: searchMemories },
         },
       });
     }
@@ -121,6 +121,20 @@ test('live smoke verifies the public MCP path while printing aggregates only', a
     .filter((call) => call.body?.method === 'tools/call')
     .map((call) => call.body.params.name);
   assert.deepEqual(toolNames, ['search_memory', 'get_memory_item']);
+});
+
+test('live smoke fails when the technical search returns zero safe memories', async () => {
+  const fake = fakeFetch({ searchMemories: [] });
+
+  await assert.rejects(
+    runLiveSmoke({
+      baseUrl: 'https://plugin.example.com',
+      token: 'stage-secret',
+      fetchImpl: fake.fetchImpl,
+      write: () => {},
+    }),
+    /at least one|zero|no safe memor/i,
+  );
 });
 
 test('live smoke rejects missing operator inputs before network access', async () => {
