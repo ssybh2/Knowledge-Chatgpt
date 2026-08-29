@@ -140,6 +140,45 @@ export async function exchangeAuthorizationCode({
   return { accessToken, refreshToken };
 }
 
+export async function refreshOAuthTokens({
+  issuer,
+  clientId,
+  resource,
+  refreshToken,
+  fetchImpl = fetch,
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new TypeError('fetch implementation is required');
+  const normalizedIssuer = normalizeIssuer(issuer);
+  const previousRefreshToken = requiredText(refreshToken, 'refresh token');
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: requiredText(clientId, 'Auth0 client ID'),
+    refresh_token: previousRefreshToken,
+    resource: normalizeResource(resource),
+  });
+
+  const response = await fetchImpl(new URL('oauth/token', normalizedIssuer), {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  if (!response.ok) throw new Error(`Auth0 refresh failed with status ${response.status}`);
+
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error('Auth0 refresh returned invalid JSON');
+  }
+
+  const accessToken = String(payload?.access_token || '').trim();
+  if (!accessToken) throw new Error('Auth0 refresh did not return an access token');
+  return {
+    accessToken,
+    refreshToken: String(payload?.refresh_token || '').trim() || previousRefreshToken,
+  };
+}
+
 function validateLoopbackRedirect(value) {
   const url = new URL(requiredText(value, 'OAuth redirect URI'));
   if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
@@ -169,7 +208,13 @@ function openBrowser(url) {
   child.unref();
 }
 
-async function waitForCallback({ redirectUri, expectedState, authorizationUrl }) {
+async function waitForCallback({
+  redirectUri,
+  expectedState,
+  authorizationUrl,
+  openBrowserImpl = openBrowser,
+}) {
+  if (typeof openBrowserImpl !== 'function') throw new TypeError('browser opener is required');
   const redirect = validateLoopbackRedirect(redirectUri);
   const port = Number(redirect.port);
 
@@ -216,7 +261,7 @@ async function waitForCallback({ redirectUri, expectedState, authorizationUrl })
   }, CALLBACK_TIMEOUT_MS);
 
   try {
-    openBrowser(authorizationUrl);
+    openBrowserImpl(authorizationUrl);
     return await callbackPromise;
   } finally {
     clearTimeout(timeout);
@@ -224,21 +269,18 @@ async function waitForCallback({ redirectUri, expectedState, authorizationUrl })
   }
 }
 
-export async function runOAuthLogin({
+export async function obtainOAuthTokens({
   issuer,
   clientId,
-  pluginBaseUrl,
   resource,
   redirectUri = DEFAULT_REDIRECT_URI,
   fetchImpl = fetch,
-  write = (line) => console.log(line),
+  openBrowserImpl = openBrowser,
 } = {}) {
   const normalizedIssuer = normalizeIssuer(issuer);
   const normalizedClientId = requiredText(clientId, 'Auth0 client ID');
-  const normalizedBaseUrl = requiredText(pluginBaseUrl, 'Teddy Plugin URL').replace(/\/+$/, '');
-  const normalizedResource = normalizeResource(resource || `${normalizedBaseUrl}/mcp`);
+  const normalizedResource = normalizeResource(resource);
   const normalizedRedirectUri = validateLoopbackRedirect(redirectUri).toString();
-
   const state = base64UrlRandom(24);
   const codeVerifier = base64UrlRandom(48);
   const codeChallenge = await codeChallengeForVerifier(codeVerifier);
@@ -251,14 +293,14 @@ export async function runOAuthLogin({
     codeChallenge,
   });
 
-  write('Opening Auth0 login in your browser...');
   const code = await waitForCallback({
     redirectUri: normalizedRedirectUri,
     expectedState: state,
     authorizationUrl,
+    openBrowserImpl,
   });
 
-  const { accessToken } = await exchangeAuthorizationCode({
+  return exchangeAuthorizationCode({
     issuer: normalizedIssuer,
     clientId: normalizedClientId,
     redirectUri: normalizedRedirectUri,
@@ -266,6 +308,30 @@ export async function runOAuthLogin({
     code,
     codeVerifier,
     fetchImpl,
+  });
+}
+
+export async function runOAuthLogin({
+  issuer,
+  clientId,
+  pluginBaseUrl,
+  resource,
+  redirectUri = DEFAULT_REDIRECT_URI,
+  fetchImpl = fetch,
+  write = (line) => console.log(line),
+  openBrowserImpl = openBrowser,
+} = {}) {
+  const normalizedBaseUrl = requiredText(pluginBaseUrl, 'Teddy Plugin URL').replace(/\/+$/, '');
+  const normalizedResource = normalizeResource(resource || `${normalizedBaseUrl}/mcp`);
+
+  write('Opening Auth0 login in your browser...');
+  const { accessToken } = await obtainOAuthTokens({
+    issuer,
+    clientId,
+    resource: normalizedResource,
+    redirectUri,
+    fetchImpl,
+    openBrowserImpl,
   });
 
   return runLiveSmoke({
