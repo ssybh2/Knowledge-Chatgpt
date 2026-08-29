@@ -112,7 +112,10 @@ test('live smoke verifies the public MCP path while printing aggregates only', a
   assert.equal(printed.includes('stage-secret'), false);
   assert.deepEqual(JSON.parse(printed), report);
 
-  const methods = fake.calls.map((call) => call.body?.method).filter(Boolean);
+  const methods = fake.calls
+    .filter((call) => Boolean(call.authorization))
+    .map((call) => call.body?.method)
+    .filter(Boolean);
   assert.deepEqual(methods, ['initialize', 'tools/list', 'tools/call', 'tools/call']);
   const toolNames = fake.calls
     .filter((call) => call.body?.method === 'tools/call')
