@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
+import * as oauthLogin from '../scripts/oauth-login.mjs';
+
+const {
   browserLaunchSpec,
   buildAuthorizationUrl,
   codeChallengeForVerifier,
   exchangeAuthorizationCode,
   validateCallback,
-} from '../scripts/oauth-login.mjs';
+} = oauthLogin;
 
 const issuer = 'https://tenant.example.auth0.com/';
 const resource = 'https://teddy-memory-plugin.3767174214.workers.dev/mcp';
@@ -131,4 +133,69 @@ test('token exchange fails closed when Auth0 omits access or refresh token', asy
     }),
     /refresh token/i,
   );
+});
+
+test('oauth login module exports reusable authorization and refresh helpers', () => {
+  assert.equal(typeof oauthLogin.obtainOAuthTokens, 'function');
+  assert.equal(typeof oauthLogin.refreshOAuthTokens, 'function');
+});
+
+test('refresh token grant is public-client only and resource-bound', async () => {
+  assert.equal(typeof oauthLogin.refreshOAuthTokens, 'function');
+  let request;
+  const fetchImpl = async (input, init = {}) => {
+    request = { input: String(input), init };
+    return new Response(JSON.stringify({
+      access_token: 'NEW_ACCESS_DO_NOT_PRINT',
+      refresh_token: 'NEW_REFRESH_DO_NOT_PRINT',
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  const result = await oauthLogin.refreshOAuthTokens({
+    issuer,
+    clientId: 'public-client-id',
+    resource,
+    refreshToken: 'OLD_REFRESH_DO_NOT_PRINT',
+    fetchImpl,
+  });
+
+  assert.deepEqual(result, {
+    accessToken: 'NEW_ACCESS_DO_NOT_PRINT',
+    refreshToken: 'NEW_REFRESH_DO_NOT_PRINT',
+  });
+  assert.equal(request.input, 'https://tenant.example.auth0.com/oauth/token');
+  assert.equal(request.init.method, 'POST');
+  assert.equal(request.init.headers['content-type'], 'application/x-www-form-urlencoded');
+  const body = new URLSearchParams(request.init.body);
+  assert.equal(body.get('grant_type'), 'refresh_token');
+  assert.equal(body.get('client_id'), 'public-client-id');
+  assert.equal(body.get('refresh_token'), 'OLD_REFRESH_DO_NOT_PRINT');
+  assert.equal(body.get('resource'), resource);
+  assert.equal(body.has('client_secret'), false);
+});
+
+test('refresh token grant retains previous refresh token when Auth0 does not rotate it', async () => {
+  assert.equal(typeof oauthLogin.refreshOAuthTokens, 'function');
+  const fetchImpl = async () => new Response(JSON.stringify({
+    access_token: 'ROTATED_ACCESS_DO_NOT_PRINT',
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+
+  const result = await oauthLogin.refreshOAuthTokens({
+    issuer,
+    clientId: 'public-client-id',
+    resource,
+    refreshToken: 'UNCHANGED_REFRESH_DO_NOT_PRINT',
+    fetchImpl,
+  });
+
+  assert.deepEqual(result, {
+    accessToken: 'ROTATED_ACCESS_DO_NOT_PRINT',
+    refreshToken: 'UNCHANGED_REFRESH_DO_NOT_PRINT',
+  });
 });
