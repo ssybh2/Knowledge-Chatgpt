@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": {"node": ">=22"},
-  "scripts": {"test": "node --test"}
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "smoke": "node --check src/cli.js && node --input-type=module -e \"await import('./src/policy.js'); await import('./src/approval.js'); await import('./src/d1-export.js')\""
+  }
 }
