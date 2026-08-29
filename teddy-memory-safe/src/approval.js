@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { candidateIdForSource } from './candidates.js';
 import { scanCandidateFields } from './policy.js';
 
 const CATEGORIES = new Set(['project', 'learning', 'decision', 'plan', 'preference', 'reference']);
@@ -44,6 +45,20 @@ function hashHex(value, length) {
   return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, length);
 }
 
+export function approvedIdForCandidate(ownerId, candidateId, revision = 1) {
+  return `sm_${hashHex(`${ownerId}\0${candidateId}\0${revision}`, 32)}`;
+}
+
+export function memoryRefForApprovedId(id) {
+  return `mem_${hashHex(`public-ref\0${id}`, 32)}`;
+}
+
+export function memoryRefForSource({ ownerId, messageId, revision = 1 } = {}) {
+  const candidateId = candidateIdForSource(ownerId, messageId);
+  const id = approvedIdForCandidate(ownerId, candidateId, revision);
+  return memoryRefForApprovedId(id);
+}
+
 export function compileApprovedMemory(candidate, decision) {
   if (!decision || decision.decision === 'pending' || decision.decision === 'reject') return null;
   if (decision.decision !== 'approve') throw new TypeError('decision must be approve, reject, or pending');
@@ -66,8 +81,8 @@ export function compileApprovedMemory(candidate, decision) {
   const reasons = scanCandidateFields({ title, summary, keywords });
   if (reasons.length) throw safePolicyError(reasons);
 
-  const id = `sm_${hashHex(`${ownerId}\0${candidate.candidate_id}\0${revision}`, 32)}`;
-  const memoryRef = `mem_${hashHex(`public-ref\0${id}`, 32)}`;
+  const id = approvedIdForCandidate(ownerId, candidate.candidate_id, revision);
+  const memoryRef = memoryRefForApprovedId(id);
 
   return {
     id,

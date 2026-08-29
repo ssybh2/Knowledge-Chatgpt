@@ -67,7 +67,7 @@ function assertNoInternalFields(value) {
   }
 }
 
-async function postMcp({ baseUrl, token, body, fetchImpl }) {
+export async function postMcp({ baseUrl, token, body, fetchImpl }) {
   const response = await fetchImpl(`${baseUrl}/mcp`, {
     method: 'POST',
     headers: {

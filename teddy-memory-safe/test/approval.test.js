@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compileApprovedMemory } from '../src/approval.js';
+import * as approval from '../src/approval.js';
+import { buildCandidate } from '../src/candidates.js';
+
+const { compileApprovedMemory } = approval;
 
 const candidate = {
   candidate_id: 'cand_0123456789abcdef01234567',
@@ -28,6 +31,52 @@ const approve = {
   event_time: 1787757630,
   revision: 1,
 };
+
+test('approved identity helpers preserve exact deployed id and public ref formulas', () => {
+  assert.equal(typeof approval.approvedIdForCandidate, 'function');
+  assert.equal(typeof approval.memoryRefForApprovedId, 'function');
+  assert.equal(typeof approval.memoryRefForSource, 'function');
+
+  assert.equal(
+    approval.approvedIdForCandidate('owner-1', 'cand_79c264d12523e775ddbc56bc', 1),
+    'sm_5298f63346e87ecdd6ff9346d9d67b0e',
+  );
+  assert.equal(
+    approval.memoryRefForApprovedId('sm_5298f63346e87ecdd6ff9346d9d67b0e'),
+    'mem_ed3731aa59a526f3077f1fd56f769701',
+  );
+  assert.equal(
+    approval.memoryRefForSource({ ownerId: 'owner-1', messageId: 'conv::node-1', revision: 1 }),
+    'mem_ed3731aa59a526f3077f1fd56f769701',
+  );
+});
+
+test('memoryRefForSource matches the normal candidate-to-approved path', () => {
+  const message = {
+    id: 'conv::node-1',
+    conversation_id: 'conv',
+    role: 'user',
+    content: 'I decided to keep EtherCAT servo integration read-only during the first verification stage.',
+    create_time: 123,
+    sequence_index: 0,
+    retrievable: true,
+  };
+  const built = buildCandidate({ ownerId: 'owner-1', message, conversationTitle: 'EtherCAT' });
+  const compiled = compileApprovedMemory(built, {
+    candidate_id: built.candidate_id,
+    decision: 'approve',
+    category: 'reference',
+    title: built.title,
+    summary: built.summary,
+    keywords: [],
+    event_time: built.event_time,
+    revision: 1,
+  });
+  assert.equal(
+    approval.memoryRefForSource({ ownerId: 'owner-1', messageId: message.id, revision: 1 }),
+    compiled.memory_ref,
+  );
+});
 
 test('missing or reject decision returns null', () => {
   assert.equal(compileApprovedMemory(candidate, null), null);
