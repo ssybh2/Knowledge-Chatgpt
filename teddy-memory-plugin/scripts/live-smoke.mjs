@@ -42,7 +42,7 @@ function normalizeBaseUrl(value) {
 
 function normalizeToken(value) {
   const token = String(value || '').trim();
-  if (!token) throw new Error('PLUGIN_DEV_ACCESS_TOKEN is required locally');
+  if (!token) throw new Error('TEDDY_PLUGIN_ACCESS_TOKEN is required locally');
   return token;
 }
 
@@ -96,8 +96,26 @@ export async function runLiveSmoke({
   assertCondition(typeof fetchImpl === 'function', 'fetch implementation is required');
   assertCondition(typeof write === 'function', 'write callback is required');
 
+  const expectedResource = `${normalizedBaseUrl}/mcp`;
+  const expectedMetadataUrl = `${normalizedBaseUrl}/.well-known/oauth-protected-resource`;
+
   const healthResponse = await fetchImpl(`${normalizedBaseUrl}/healthz`, { method: 'GET' });
   assertCondition(healthResponse.status === 200, `healthz failed with status ${healthResponse.status}`);
+
+  const metadataResponse = await fetchImpl(expectedMetadataUrl, { method: 'GET' });
+  assertCondition(metadataResponse.status === 200, `OAuth metadata failed with status ${metadataResponse.status}`);
+  const metadata = await metadataResponse.json();
+  assertCondition(metadata?.resource === expectedResource, 'OAuth metadata resource is not the canonical MCP resource');
+  assertCondition(
+    Array.isArray(metadata?.authorization_servers) && metadata.authorization_servers.length > 0,
+    'OAuth metadata is missing authorization_servers',
+  );
+  assertCondition(
+    Array.isArray(metadata?.scopes_supported)
+      && metadata.scopes_supported.includes('memory:read')
+      && !metadata.scopes_supported.includes('offline_access'),
+    'OAuth metadata scopes are invalid',
+  );
 
   const unauthorizedResponse = await fetchImpl(`${normalizedBaseUrl}/mcp`, {
     method: 'POST',
@@ -108,6 +126,12 @@ export async function runLiveSmoke({
     body: JSON.stringify({}),
   });
   assertCondition(unauthorizedResponse.status === 401, 'unauthenticated /mcp did not return 401');
+  const challenge = unauthorizedResponse.headers.get('www-authenticate') || '';
+  assertCondition(
+    challenge.includes(`resource_metadata="${expectedMetadataUrl}"`)
+      && challenge.includes('scope="memory:read"'),
+    'unauthenticated /mcp did not advertise the OAuth resource metadata and scope',
+  );
 
   const initialize = await postMcp({
     baseUrl: normalizedBaseUrl,
@@ -180,7 +204,9 @@ export async function runLiveSmoke({
 
   const report = {
     health: true,
+    metadata: true,
     unauthorized: true,
+    oauth_authenticated: true,
     tools: toolNames.length,
     search_result_count: memories.length,
     unknown_ref_not_found: true,
@@ -193,7 +219,7 @@ async function main() {
   try {
     await runLiveSmoke({
       baseUrl: process.env.TEDDY_PLUGIN_URL,
-      token: process.env.PLUGIN_DEV_ACCESS_TOKEN,
+      token: process.env.TEDDY_PLUGIN_ACCESS_TOKEN,
     });
   } catch (error) {
     console.error(error instanceof Error ? error.message : 'Live smoke failed');
