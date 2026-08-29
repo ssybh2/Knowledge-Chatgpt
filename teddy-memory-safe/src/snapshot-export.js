@@ -253,6 +253,40 @@ export function renderRollbackPointer({
   ].join('\n');
 }
 
+export function renderSnapshotCleanup({ ownerId, keepSuccessful = 3 } = {}) {
+  const owner = requiredText(ownerId, 'ownerId');
+  const keep = Number(keepSuccessful);
+  if (!Number.isInteger(keep) || keep < 3) {
+    throw new TypeError('keepSuccessful must be an integer >= 3');
+  }
+  const retiredToKeep = keep - 1;
+  const ownerLiteral = sqlLiteral(owner);
+  const retiredSelection = [
+    'SELECT snapshot_id FROM safe_snapshots',
+    `WHERE owner_id = ${ownerLiteral}`,
+    "  AND status = 'retired'",
+    'ORDER BY created_at DESC, snapshot_id DESC',
+    `LIMIT -1 OFFSET ${retiredToKeep}`,
+  ].join('\n');
+
+  return [
+    'BEGIN TRANSACTION;',
+    'DELETE FROM safe_snapshot_memories',
+    `WHERE owner_id = ${ownerLiteral}`,
+    '  AND snapshot_id IN (',
+    retiredSelection.split('\n').map((line) => `    ${line}`).join('\n'),
+    '  );',
+    'DELETE FROM safe_snapshots',
+    `WHERE owner_id = ${ownerLiteral}`,
+    "  AND status = 'retired'",
+    '  AND snapshot_id IN (',
+    retiredSelection.split('\n').map((line) => `    ${line}`).join('\n'),
+    '  );',
+    'COMMIT;',
+    '',
+  ].join('\n');
+}
+
 export async function writeSnapshotBatches(records, {
   ownerId,
   snapshotId,
