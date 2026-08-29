@@ -105,7 +105,7 @@ export async function runLiveSmoke({
       'content-type': 'application/json',
       accept: 'application/json, text/event-stream',
     },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'tools/list' }),
+    body: JSON.stringify({}),
   });
   assertCondition(unauthorizedResponse.status === 401, 'unauthenticated /mcp did not return 401');
 
