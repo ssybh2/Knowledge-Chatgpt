@@ -9,7 +9,7 @@ function truncateCodePoints(value, max) {
   return Array.from(String(value ?? '')).slice(0, max).join('');
 }
 
-function stableCandidateId(ownerId, messageId) {
+export function candidateIdForSource(ownerId, messageId) {
   const digest = createHash('sha256')
     .update(`${ownerId}\0${messageId}`, 'utf8')
     .digest('hex')
@@ -33,7 +33,7 @@ export function buildCandidate({ ownerId, message, conversationTitle } = {}) {
   const blockedReasons = scanCandidateFields({ title, summary, keywords });
 
   return {
-    candidate_id: stableCandidateId(normalizedOwnerId, String(message.id ?? '')),
+    candidate_id: candidateIdForSource(normalizedOwnerId, String(message.id ?? '')),
     owner_id: normalizedOwnerId,
     category: 'reference',
     title,
