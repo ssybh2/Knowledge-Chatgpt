@@ -18,7 +18,13 @@ function backendServiceFetch(env) {
   if (!service || typeof service.fetch !== 'function') {
     throw new Error('TEDDY_MEMORY_API service binding is required');
   }
-  return service.fetch.bind(service);
+
+  return async function serviceBindingFetch(input, init) {
+    const request = input instanceof Request && init === undefined
+      ? input
+      : new Request(input, init);
+    return service.fetch(request);
+  };
 }
 
 export function createWorkerFetch({
