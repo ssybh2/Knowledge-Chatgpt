@@ -2,57 +2,31 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make twice-monthly Teddy Memory refreshes a one-entry-point workflow: select a fresh OpenAI export ZIP, validate/normalize it, safely upsert Private Full Memory, rebuild and atomically publish Plugin-Safe Memory, verify OAuth/MCP, and write a redacted aggregate report.
+**Goal:** Turn a fresh OpenAI export ZIP into a safe, repeatable one-command Teddy Memory refresh while preserving existing Private archive IDs, existing Safe `memory_ref` values, absent-source history, OAuth principal mappings, and rollback capability.
 
-**Architecture:** A new local-only `teddy-memory-maintenance` Node package owns orchestration, state manifests, diff/safety gates, Wrangler D1 calls, and reporting. A tiny Windows `.cmd` + PowerShell launcher handles ZIP selection/extraction, then hands the extracted snapshot to Node. The maintenance package reuses `teddy-memory-safe` for policy-sensitive filtering and the snapshot primitives from the Safe Snapshot plan; production writes are staged so suspicious exports or failed safe loads leave the current live snapshot unchanged.
+**Architecture:** A local-only `teddy-memory-maintenance` package normalizes OpenAI export data, maps each source message to the existing Private archive identity (reusing every current production ID exactly and allocating a reserved deterministic ID only for truly new composite identities), rebuilds Safe candidates from those archive IDs, conservatively merges new Safe approvals over the current active Safe baseline, stages a new Safe snapshot, performs additive Private upserts, then switches one Safe pointer and verifies OAuth/MCP before finalizing statuses. A Windows launcher reduces recurring operation to choosing the ZIP.
 
-**Tech Stack:** Windows PowerShell 5+/7, Node.js >=22, native Node `fs/crypto/child_process`, `node:test`, Wrangler 4.127.1, Cloudflare D1/SQLite, existing `teddy-memory-safe` CLI/policy, existing Auth0/MCP compatibility lab.
+**Tech Stack:** Windows PowerShell 5+/7, Node.js >=22, `node:test`, Cloudflare D1/SQLite, Wrangler 4.127.1, existing `teddy-memory-safe`, existing `teddy-memory-plugin` Compatibility Lab and snapshot lifecycle.
 
 **Spec:** `docs/superpowers/specs/2026-08-29-teddy-memory-maintenance-design.md`
 
 ## Global Constraints
 
-- Implement and verify `2026-08-29-teddy-memory-chatgpt-compatibility.md` and `2026-08-29-teddy-memory-safe-snapshots.md` before executing Tasks 5–12 of this plan.
-- User-facing recurring operation is one Windows entry point: `UPDATE_TEDDY_MEMORY.cmd` or equivalent one PowerShell command.
-- OpenAI export ZIPs, extracted exports, normalized real JSONL, review/approved JSONL, generated real SQL, source-ID maps, and detailed run work stay under gitignored local storage.
-- Real reports/state manifests contain aggregate counts and digests only; no message text, source IDs, OAuth tokens, Auth0 subject/hash, API keys, or Client Secret.
-- Every ZIP is treated as a complete source snapshot; skipping the 15th-day run does not break the next run.
-- Normal mode never deletes a Private Full Memory row because it disappeared from one export.
-- Large unexplained count regression threshold defaults to 10%; only explicit `-AllowLargeRegression` overrides it.
-- The same ZIP is idempotent and should become `NO_CHANGES` after read-only verification.
-- Private Full Memory remains in `teddy-memory-core`; Plugin-Safe remains in `teddy-memory-plugin-safe`.
-- Safe publication uses the versioned snapshot/pointer model from `2026-08-29-teddy-memory-safe-snapshots.md`.
-- `oauth_principals` is never part of content migration or work artifacts.
-- Private production writes are disabled until the importer proves compatibility with the existing production schema/identity model.
-- Existing production Private snapshot baseline is 757 conversations / 14,546 messages / 14,545 retrievable messages, with conversation-scoped archive identity because 14,488 unique original message IDs include 58 cross-conversation duplicates.
+- Complete `2026-08-29-teddy-memory-chatgpt-compatibility.md` and `2026-08-29-teddy-memory-safe-snapshots.md` before production acceptance in this plan.
+- Real ZIP/extracted data/normalized JSONL/source-ID maps/review/approved/merged JSONL/generated SQL remain under gitignored `work/` only.
+- User-facing reports/manifests contain aggregate counts and digests only.
+- Existing Private rows always retain their current production `messages.id`.
+- Private identity key is `(conversation_id, original_message_id)`; absence from a new export never deletes the old row.
+- For a composite identity not present in current production, allocate `msg2_<32 lowercase hex>` from SHA-256 of `conversation_id + NUL + original_message_id`; before enabling this allocator, prove production currently has zero `messages.id LIKE 'msg2_%'` and collision-check every generated ID against all current IDs. This is a versioned extension only for unseen records; it never rewrites existing archive IDs.
+- Safe candidate/ref derivation always uses the materialized Private archive `message.id`, never the raw OpenAI message ID.
+- Safe merge semantics are exact: baseline + approved overlay; present-but-not-approved ref removed; absent-source ref retained.
+- Default suspicious count regression threshold is 10%; zero/malformed input always aborts, even with override.
+- `oauth_principals` is never read into work artifacts and never changed by maintenance.
+- The same ZIP is idempotent and becomes `NO_CHANGES` after read-only verification.
 
 ---
 
-## File Structure
-
-- Create `UPDATE_TEDDY_MEMORY.cmd` — double-click wrapper.
-- Create `Update-Teddy-Memory.ps1` — file picker, extraction, dependency bootstrap, Node invocation.
-- Create `teddy-memory-maintenance/package.json` and `package-lock.json` — Node package + Wrangler dependency/scripts.
-- Create `teddy-memory-maintenance/config.json` — public/non-secret stable config only.
-- Create `teddy-memory-maintenance/.gitignore` — ignore `work/`, local env, real reports/details.
-- Create `teddy-memory-maintenance/src/cli.mjs` — top-level command routing.
-- Create `teddy-memory-maintenance/src/export-reader.js` — exported ZIP/extracted-layout discovery and canonical input hashing.
-- Create `teddy-memory-maintenance/src/normalizer.js` — OpenAI conversation mapping -> canonical conversation/message records and local normalized JSONL writer.
-- Create `teddy-memory-maintenance/src/state.js` — aggregate manifest read/write and same-export detection.
-- Create `teddy-memory-maintenance/src/diff.js` — aggregate/detailed in-memory diff and suspicious regression gate.
-- Create `teddy-memory-maintenance/src/command-runner.js` — direct child-process runner with redacted capture.
-- Create `teddy-memory-maintenance/src/wrangler-d1.js` — read/write D1 adapter using local Wrangler auth.
-- Create `teddy-memory-maintenance/src/private-import.js` — schema probe, existing identity mapping/current-row reader, additive/upsert SQL generation.
-- Create `teddy-memory-maintenance/src/safe-build.js` — existing Safe Corpus CLI orchestration.
-- Create `teddy-memory-maintenance/src/safe-promotion.js` — snapshot load/readiness/activation/rollback/cleanup orchestration.
-- Create `teddy-memory-maintenance/src/verify.js` — aggregate D1 + public Worker verification.
-- Create `teddy-memory-maintenance/src/report.js` — redacted final report.
-- Create `teddy-memory-maintenance/src/run.js` — full ordered workflow.
-- Create `teddy-memory-maintenance/test/*.test.js` and synthetic `fixtures/` only.
-- Create `.github/workflows/teddy-memory-maintenance.yml` — CI for the new package plus dependent Safe/Plugin suites.
-- Modify root/maintenance docs after live no-change verification.
-
-### Task 1: Create the maintenance package, public config, redacted state/report primitives
+### Task 1: Scaffold maintenance package, public config, manifest/report redaction
 
 **Files:**
 - Create: `teddy-memory-maintenance/package.json`
@@ -64,89 +38,61 @@
 - Create: `teddy-memory-maintenance/test/state-report.test.js`
 
 **Interfaces:**
-- Produces: `loadLastSuccessfulManifest(path) -> Promise<Manifest|null>`.
-- Produces: `writeSuccessfulManifest(path, manifest) -> Promise<void>`.
-- Produces: `formatMaintenanceReport(report) -> string`.
-- Public config keys: `owner_id`, `private_d1`, `safe_d1`, `plugin_url`, `auth0_issuer`, `auth0_client_id`, `auth0_redirect_uri`, `regression_threshold`.
+- `loadLastSuccessfulManifest(path)`
+- `writeSuccessfulManifest(path, manifest)`
+- `formatMaintenanceReport(report)`
 
-- [ ] **Step 1: Write failing state/report tests**
+- [ ] **Step 1: Write RED state/report tests**
 
-Use a manifest containing only:
+Allowed manifest keys are exactly:
 
 ```js
-{
-  run_id: '2026-09-15T12-00-00Z',
-  export_sha256: 'a'.repeat(64),
-  conversations: 812,
-  messages: 15892,
-  retrievable: 15890,
-  safe_approved: 4621,
-  safe_blocked: 391,
-  completed_at: '2026-09-15T12:08:22Z'
-}
+const ALLOWED = new Set([
+  'run_id','export_sha256','conversations','messages','retrievable',
+  'safe_approved','safe_blocked','safe_published','completed_at',
+]);
 ```
 
-Assert rejected manifest keys include `content`, `message_id`, `conversation_id`, `access_token`, `refresh_token`, `subject_hash`, and `sub`.
+Reject `content,message_id,conversation_id,access_token,refresh_token,sub,subject_hash`. Inject `SECRET_TOKEN` and `MEMORY_CONTENT_SENTINEL` into internal errors and assert formatted output contains neither.
 
-Report tests inject sentinel strings `SECRET_TOKEN` and `MEMORY_CONTENT_SENTINEL` into internal error objects and assert the formatter emits neither.
-
-- [ ] **Step 2: Run and verify RED**
+- [ ] **Step 2: Run RED**
 
 ```powershell
 cd teddy-memory-maintenance
 node --test test/state-report.test.js
 ```
 
-Expected: FAIL because package/modules do not exist.
+- [ ] **Step 3: Implement package and config**
 
-- [ ] **Step 3: Implement package/config/state/report**
-
-Initial `package.json` only references files created in this task:
+Initial `package.json`:
 
 ```json
 {
-  "name": "teddy-memory-maintenance",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "engines": { "node": ">=22" },
-  "scripts": {
-    "test": "node --test",
-    "smoke": "node --check src/state.js && node --check src/report.js && node --input-type=module -e \"await import('./src/state.js'); await import('./src/report.js')\""
-  },
-  "devDependencies": { "wrangler": "4.127.1" }
+  "name":"teddy-memory-maintenance","version":"0.1.0","private":true,"type":"module",
+  "engines":{"node":">=22"},
+  "scripts":{"test":"node --test","smoke":"node --check src/state.js && node --check src/report.js"},
+  "devDependencies":{"wrangler":"4.127.1"}
 }
 ```
 
-Track this exact public `config.json`:
+Track only public config:
 
 ```json
 {
-  "owner_id": "teddy-primary",
-  "private_d1": "teddy-memory-core",
-  "safe_d1": "teddy-memory-plugin-safe",
-  "plugin_url": "https://teddy-memory-plugin.3767174214.workers.dev",
-  "auth0_issuer": "https://dev-32xguyuwp0wrwddr.us.auth0.com/",
-  "auth0_client_id": "1hN8PGhbAUGzOvyJOkF7gObHiDE318qA",
-  "auth0_redirect_uri": "http://localhost:8789/callback",
-  "regression_threshold": 0.1
+  "owner_id":"teddy-primary",
+  "private_d1":"teddy-memory-core",
+  "safe_d1":"teddy-memory-plugin-safe",
+  "plugin_url":"https://teddy-memory-plugin.3767174214.workers.dev",
+  "auth0_issuer":"https://dev-32xguyuwp0wrwddr.us.auth0.com/",
+  "auth0_client_id":"1hN8PGhbAUGzOvyJOkF7gObHiDE318qA",
+  "auth0_redirect_uri":"http://localhost:8789/callback",
+  "regression_threshold":0.1
 }
 ```
 
-The Client ID is a public OAuth client identifier; no Client Secret is stored.
+`.gitignore` includes `node_modules/`, `work/`, `.env*`, `.dev.vars`, `*.private.json`.
 
-`.gitignore`:
-
-```text
-node_modules/
-work/
-.env
-.env.*
-.dev.vars
-*.private.json
-```
-
-- [ ] **Step 4: Install and run tests/smoke**
+- [ ] **Step 4: Install and verify**
 
 ```powershell
 npm install
@@ -154,16 +100,14 @@ npm test
 npm run smoke
 ```
 
-Expected: PASS and `package-lock.json` generated.
-
 - [ ] **Step 5: Commit**
 
 ```bash
-git add teddy-memory-maintenance/package.json teddy-memory-maintenance/package-lock.json teddy-memory-maintenance/config.json teddy-memory-maintenance/.gitignore teddy-memory-maintenance/src/state.js teddy-memory-maintenance/src/report.js teddy-memory-maintenance/test/state-report.test.js
+git add teddy-memory-maintenance
 git commit -m "feat: scaffold teddy memory maintenance"
 ```
 
-### Task 2: Discover and normalize an extracted OpenAI export deterministically
+### Task 2: Normalize OpenAI export without assigning archive IDs yet
 
 **Files:**
 - Create: `teddy-memory-maintenance/src/export-reader.js`
@@ -172,130 +116,79 @@ git commit -m "feat: scaffold teddy memory maintenance"
 - Create: `teddy-memory-maintenance/fixtures/openai-export-ambiguous/a/conversations.json`
 - Create: `teddy-memory-maintenance/fixtures/openai-export-ambiguous/b/conversations.json`
 - Create: `teddy-memory-maintenance/test/export-normalizer.test.js`
-- Modify: `teddy-memory-maintenance/package.json` — add these modules to smoke checks.
 
 **Interfaces:**
-- Produces: `sha256File(zipPath) -> Promise<string>` returning 64 lowercase hex.
-- Produces: `locateConversationsJson(extractedDir) -> Promise<string>`; exactly one unambiguous candidate or fail closed.
-- Produces: `normalizeOpenAiExport(conversationsJsonPath) -> Promise<{ conversations: Conversation[], messages: Message[], stats }>`.
-- Produces: `writeNormalizedJsonl(normalized, outDir) -> Promise<{ conversationsJsonl, messagesJsonl }>`.
-- `Conversation`: `{ id, title, create_time, update_time }` with nullable times.
-- `Message`: `{ source_node_id, original_message_id, conversation_id, role, content, create_time, sequence_index, retrievable }`.
+- `sha256File(zipPath) -> 64hex`
+- `locateConversationsJson(extractedDir) -> path`
+- `normalizeOpenAiExport(path) -> { conversations, messages, stats }`
+- Raw normalized message: `{ source_node_id, original_message_id, conversation_id, role, content, create_time, sequence_index, retrievable }`.
 
-- [ ] **Step 1: Write synthetic fixture tests first**
+- [ ] **Step 1: RED fixture tests**
 
-Fixture includes two conversations with mapping trees, user/assistant text messages, one empty/non-retrievable node, and a duplicated original message ID reused across the two conversations.
+Require two conversations, deterministic sequence order, cross-conversation duplicate original IDs allowed, conflicting duplicate composite IDs rejected, ambiguous `conversations.json` layout rejected, and no content written to stdout.
 
-```js
-const normalized = await normalizeOpenAiExport(path);
-assert.equal(normalized.conversations.length, 2);
-assert.equal(normalized.messages.every((m) => m.conversation_id), true);
-assert.equal(
-  new Set(normalized.messages.map((m) => `${m.conversation_id}\0${m.original_message_id}`)).size,
-  normalized.messages.length,
-);
-assert.deepEqual(
-  normalized.messages.filter((m) => m.conversation_id === 'conv-a').map((m) => m.sequence_index),
-  [0, 1, 2],
-);
-```
-
-Also call `writeNormalizedJsonl` into a temporary directory and verify one JSON object per line with the same aggregate counts. Ambiguous layout rejects when two unrelated `conversations.json` files exist.
-
-- [ ] **Step 2: Run and verify RED**
+- [ ] **Step 2: Run RED**
 
 ```powershell
 node --test test/export-normalizer.test.js
 ```
 
-Expected: FAIL because modules do not exist.
+- [ ] **Step 3: Implement normalization**
 
-- [ ] **Step 3: Implement deterministic normalization**
+Parse `mapping` nodes. Use `message.id || node.id` for `original_message_id`; role from `message.author.role`; text from string `content.parts`; sort by finite create time then node ID; assign zero-based sequence. Non-text/blank nodes remain represented only when needed for aggregate compatibility; `retrievable` is initially non-empty normalized text and must later match the known production baseline before writes.
 
-Rules:
-
-1. Parse the top-level conversation array.
-2. For each `mapping` node with a `message`, set `original_message_id = message.id || node.id` and preserve `source_node_id = node.id` locally.
-3. Normalize role from `message.author.role`.
-4. Normalize text from string entries in `message.content.parts`; non-text/binary payloads are not serialized into canonical text.
-5. Set `retrievable = normalized content is non-empty` for the first implementation; Task 7 must prove this reproduces the current 14,545 retrievable baseline before writes are enabled.
-6. Sort messages inside each conversation by finite `create_time` ascending, then `source_node_id` lexicographically for ties/missing time; assign zero-based `sequence_index`.
-7. Reject duplicate composite `(conversation_id, original_message_id)` records with conflicting normalized content/role/time; identical duplicates collapse to one row.
-8. Never log message content.
-9. `writeNormalizedJsonl` writes only to the caller's run work directory.
-
-Update package `smoke` to syntax-check/import `export-reader.js` and `normalizer.js` in addition to state/report.
-
-- [ ] **Step 4: Run focused/full package tests**
+- [ ] **Step 4: Verify**
 
 ```powershell
 npm test
 npm run smoke
 ```
 
-Expected: PASS.
-
 - [ ] **Step 5: Commit**
 
 ```bash
-git add teddy-memory-maintenance/src/export-reader.js teddy-memory-maintenance/src/normalizer.js teddy-memory-maintenance/fixtures teddy-memory-maintenance/test/export-normalizer.test.js teddy-memory-maintenance/package.json
-git commit -m "feat: normalize openai export snapshots"
+git add teddy-memory-maintenance/src teddy-memory-maintenance/fixtures teddy-memory-maintenance/test teddy-memory-maintenance/package.json
+git commit -m "feat: normalize openai export snapshot"
 ```
 
-### Task 3: Add aggregate diff, same-export detection, and suspicious-regression gate
+### Task 3: Add same-export and suspicious-regression gates
 
 **Files:**
 - Create: `teddy-memory-maintenance/src/diff.js`
 - Create: `teddy-memory-maintenance/test/diff.test.js`
 
 **Interfaces:**
-- Produces: `compareSnapshotStats({ previous, next, threshold = 0.10, allowLargeRegression = false }) -> { suspicious, reasons, deltas }`.
-- Produces: `sameExport(previousManifest, exportSha256) -> boolean`.
+- `sameExport(previousManifest, sha256) -> boolean`
+- `compareSnapshotStats({ previous,next,threshold=0.10,allowLargeRegression=false })`.
 
-- [ ] **Step 1: Write RED tests for 10% threshold and zero counts**
+- [ ] **Step 1: RED tests**
 
-```js
-test('12 percent message regression aborts by default', () => {
-  const result = compareSnapshotStats({
-    previous: { conversations: 100, messages: 1000 },
-    next: { conversations: 99, messages: 880 },
-    threshold: 0.10,
-  });
-  assert.equal(result.suspicious, true);
-  assert.deepEqual(result.reasons, ['messages_regressed_over_threshold']);
-});
-```
+Require zero counts always suspicious; 12% regression suspicious; 9% allowed; override suppresses only threshold reasons, never zero/malformed reasons.
 
-Also test zero messages/conversations always suspicious, 9% regression allowed, explicit override allows only count-regression reasons but not malformed/zero conditions, and same SHA returns `true`.
-
-- [ ] **Step 2: Run and verify RED**
+- [ ] **Step 2: Run RED**
 
 ```powershell
 node --test test/diff.test.js
 ```
 
-Expected: FAIL because module does not exist.
+- [ ] **Step 3: Implement pure aggregate functions**
 
-- [ ] **Step 3: Implement pure diff/gate functions**
+No content/source IDs in results.
 
-No I/O and no content fields in results. Deltas are numeric counts only.
-
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: Verify**
 
 ```powershell
 npm test
 ```
 
-Expected: PASS.
-
 - [ ] **Step 5: Commit**
 
 ```bash
 git add teddy-memory-maintenance/src/diff.js teddy-memory-maintenance/test/diff.test.js
-git commit -m "feat: add maintenance regression gates"
+git commit -m "feat: gate suspicious memory exports"
 ```
 
-### Task 4: Add direct child-process and Wrangler D1 adapters with redacted output
+### Task 4: Add shell-free Wrangler D1 adapter
 
 **Files:**
 - Create: `teddy-memory-maintenance/src/command-runner.js`
@@ -303,110 +196,194 @@ git commit -m "feat: add maintenance regression gates"
 - Create: `teddy-memory-maintenance/test/command-wrangler.test.js`
 
 **Interfaces:**
-- Produces: `runCommand(command, args, { cwd, env }) -> Promise<{ code, stdout, stderr }>` using `spawn` with `shell:false`.
-- Produces: `createWranglerD1({ wranglerJsPath, cwd, runner })` methods:
-  - `query(database, sql) -> Promise<object[]>`
-  - `executeFile(database, file) -> Promise<void>`
-  - `execute(database, sql) -> Promise<void>`.
-- Wrangler commands run as `node <wranglerJsPath> d1 execute ...`; no `.cmd` file or command shell is used.
-- Captured raw output never passes directly to the user-facing report.
+- `runCommand(command,args,{cwd,env})`
+- `createWranglerD1(...).query/execute/executeFile`
 
-- [ ] **Step 1: Write RED tests for shell bypass and redaction boundary**
+- [ ] **Step 1: RED tests**
 
-Assert arguments containing `&` remain one argument, `shell:false` is used, and the Wrangler adapter invokes `process.execPath` with the Wrangler JS path as argv[0]. Assert the D1 adapter never logs captured rows through a user `write` callback.
+Require `spawn(...,{shell:false})`, preserve `&` inside one argument, and invoke Wrangler as:
 
-- [ ] **Step 2: Run and verify RED**
+```js
+runCommand(process.execPath, [wranglerJsPath,'d1','execute',database,'--remote','--json','--command',sql], ...)
+```
+
+No captured row is automatically printed.
+
+- [ ] **Step 2: Run RED**
 
 ```powershell
 node --test test/command-wrangler.test.js
 ```
 
-Expected: FAIL.
+- [ ] **Step 3: Implement**
 
-- [ ] **Step 3: Implement the adapters**
+Resolve `node_modules/wrangler/bin/wrangler.js` with `fileURLToPath`; never invoke `.cmd` or `cmd.exe /c`.
 
-Resolve Wrangler with `fileURLToPath`:
-
-```js
-import { fileURLToPath } from 'node:url';
-
-export const DEFAULT_WRANGLER_JS = fileURLToPath(
-  new URL('../node_modules/wrangler/bin/wrangler.js', import.meta.url),
-);
-```
-
-Execute through:
-
-```js
-await runCommand(process.execPath, [wranglerJsPath, 'd1', 'execute', database, '--remote', '--json', '--command', sql], {
-  cwd,
-  env: process.env,
-});
-```
-
-For file execution replace `--command, sql` with `--file, file`. `runCommand` uses `spawn(command, args, { shell: false, ... })` and captures stdout/stderr without echoing them.
-
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: Verify**
 
 ```powershell
 npm test
 ```
 
-Expected: PASS.
-
 - [ ] **Step 5: Commit**
 
 ```bash
 git add teddy-memory-maintenance/src/command-runner.js teddy-memory-maintenance/src/wrangler-d1.js teddy-memory-maintenance/test/command-wrangler.test.js
-git commit -m "feat: add redacted wrangler d1 adapter"
+git commit -m "feat: add maintenance d1 adapter"
 ```
 
-### Task 5: Reuse the existing Safe Corpus pipeline from the maintenance package
+### Task 5: Reuse exact production archive IDs and allocate reserved IDs only for new composites
+
+**Files:**
+- Create: `teddy-memory-maintenance/src/archive-identity.js`
+- Create: `teddy-memory-maintenance/test/archive-identity.test.js`
+
+**Interfaces:**
+- `compositeSourceKey(conversationId,originalMessageId)`
+- `loadArchiveIdentityState(d1,database) -> { byComposite, existingIds, reservedPrefixCount }`
+- `allocateNewArchiveId({ conversationId,originalMessageId,existingIds }) -> msg2_<32hex>`
+- `materializeArchiveSnapshot(normalized,identityState) -> { conversations, messages, stats }`
+- Materialized message adds `id` and keeps `original_message_id`.
+
+- [ ] **Step 1: RED identity tests**
+
+Existing mapping must win exactly:
+
+```js
+const state = {
+  byComposite: new Map([['conv-a\0dup','legacy-a'],['conv-b\0dup','legacy-b']]),
+  existingIds: new Set(['legacy-a','legacy-b']), reservedPrefixCount: 0,
+};
+const out = materializeArchiveSnapshot(normalized, state);
+assert.equal(out.messages.find(m => m.conversation_id==='conv-a').id, 'legacy-a');
+```
+
+For unseen composite require exact allocator:
+
+```js
+const expected = `msg2_${createHash('sha256').update('conv-c\0new-id','utf8').digest('hex').slice(0,32)}`;
+assert.equal(allocateNewArchiveId({ conversationId:'conv-c', originalMessageId:'new-id', existingIds:new Set() }), expected);
+```
+
+Reject allocator use when `reservedPrefixCount !== 0` on the initial compatibility run unless every existing `msg2_` ID is already mapped to the same composite formula; reject any collision.
+
+- [ ] **Step 2: Run RED**
+
+```powershell
+node --test test/archive-identity.test.js
+```
+
+- [ ] **Step 3: Implement read-only D1 identity load**
+
+Queries:
+
+```sql
+SELECT id, conversation_id, original_message_id FROM messages;
+SELECT COUNT(*) AS reserved_count FROM messages WHERE id LIKE 'msg2_%';
+```
+
+Build the composite map only in process memory. `materializeArchiveSnapshot` uses existing IDs for every current composite and `msg2_` only for unseen composites.
+
+- [ ] **Step 4: Production read-only compatibility gate**
+
+Run on current D1 + current known export before any write code is accepted. Require all 14,546 current normalized composites to map to existing production IDs, zero accidental duplicate composite mappings, and known totals `757 / 14546 / 14545`. If these totals do not match, stop and fix normalization with a RED fixture; do not proceed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add teddy-memory-maintenance/src/archive-identity.js teddy-memory-maintenance/test/archive-identity.test.js
+git commit -m "feat: preserve private archive identities"
+```
+
+### Task 6: Build additive Private upserts from the materialized archive snapshot
+
+**Files:**
+- Create: `teddy-memory-maintenance/src/private-import.js`
+- Create: `teddy-memory-maintenance/test/private-import.test.js`
+
+**Interfaces:**
+- `probePrivateSchema(d1,database)`
+- `loadExistingPrivateRows(d1,database,schema)`
+- `planPrivateImport({ archiveSnapshot,schema,existingRows,outDir,batchSize=200 }) -> { stats,sqlFiles,expectedCounts }`.
+
+- [ ] **Step 1: RED schema/no-delete tests**
+
+Require `messages` columns `id,conversation_id,original_message_id,role,content,create_time,sequence_index` plus `is_retrievable|retrievable`; require only `conversations/messages` writes; one absent remote row remains untouched; existing IDs unchanged; `deleted=0`; reject `DELETE|DROP|TRUNCATE`.
+
+- [ ] **Step 2: Run RED**
+
+```powershell
+node --test test/private-import.test.js
+```
+
+- [ ] **Step 3: Implement schema-adaptive upsert generation**
+
+Probe `sqlite_schema` and `PRAGMA table_info`. Reuse the tested `sqlLiteral` helper from `../teddy-memory-safe/src/d1-export.js`. Compare remote rows locally, write only new/changed upserts, preserve current row IDs, and calculate expected post-write counts as the union of existing + new composites (not merely ZIP counts).
+
+- [ ] **Step 4: Verify**
+
+```powershell
+npm test
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add teddy-memory-maintenance/src/private-import.js teddy-memory-maintenance/test/private-import.test.js
+git commit -m "feat: plan additive private memory updates"
+```
+
+### Task 7: Build Safe approved rows from archive IDs and conservatively merge with active baseline
 
 **Files:**
 - Create: `teddy-memory-maintenance/src/safe-build.js`
+- Create: `teddy-memory-maintenance/src/safe-merge.js`
 - Create: `teddy-memory-maintenance/test/safe-build.test.js`
+- Create: `teddy-memory-maintenance/test/safe-merge.test.js`
 
 **Interfaces:**
-- Produces: `runSafeBuild({ normalized, ownerId, workDir, snapshotId, previousSnapshotId, runner }) -> Promise<{ reviewPath, approvedPath, snapshotSqlDir, stats }>`.
-- Consumes existing `teddy-memory-safe` commands: `build-candidates`, `compile-auto-safe`, `export-snapshot-d1` from the Safe Snapshot plan, and `audit-safe`.
+- `writeArchiveJsonl(archiveSnapshot,outDir) -> { conversationsJsonl,messagesJsonl }` where message JSONL uses `id=archive message.id`.
+- `loadActiveSafeBaseline(d1,database,ownerId) -> full safe rows`
+- `mergeSafeRows({ baselineRows,archiveMessages,approvedRows,ownerId }) -> mergedRows`
+- `runSafeBuild({ archiveSnapshot,baselineRows,ownerId,workDir,snapshotId,previousSnapshotId,runner })`.
 
-- [ ] **Step 1: Write failing orchestration-order tests with an injected runner**
+- [ ] **Step 1: RED merge semantics tests**
 
-Expected local order:
+Create baseline refs A/B/C. Archive source contains A/B/D. New approved contains A/D. Expected merged refs are A/C/D:
 
 ```text
-writeNormalizedJsonl
-build-candidates
-compile-auto-safe
-export-snapshot-d1
-audit-safe
+A present+approved -> overlay
+B present+not-approved -> remove
+C absent -> retain baseline
+D present+approved -> add
 ```
 
-The fake runner returns aggregate JSON only. Assert `runSafeBuild` throws before returning when any stage exits nonzero or final audit has `ok:false`.
+Derive A/B/D presence with `memoryRefForSource({ownerId,messageId:archiveMessage.id})`; never use raw OpenAI IDs. Assert retained baseline rows preserve full Safe fields and no source IDs enter merged output.
 
-- [ ] **Step 2: Run and verify RED**
+- [ ] **Step 2: Run RED**
 
 ```powershell
-node --test test/safe-build.test.js
+node --test test/safe-build.test.js test/safe-merge.test.js
 ```
 
-Expected: FAIL because module does not exist.
+- [ ] **Step 3: Implement exact local pipeline**
 
-- [ ] **Step 3: Implement safe pipeline orchestration**
-
-Call `writeNormalizedJsonl(normalized, join(workDir, 'normalized'))`. Invoke the existing Safe CLI with `process.execPath` and argument arrays for:
+Order:
 
 ```text
-build-candidates --messages <messagesJsonl> --conversations <conversationsJsonl> --owner <ownerId> --output <reviewPath>
-compile-auto-safe --candidates <reviewPath> --output <approvedPath>
-export-snapshot-d1 --approved <approvedPath> --owner <ownerId> --snapshot-id <snapshotId> --out-dir <snapshotSqlDir> --previous-snapshot-id <previousSnapshotId>
-audit-safe --approved <approvedPath> --sql-dir <snapshotSqlDir>
+writeArchiveJsonl
+build-candidates
+compile-auto-safe
+read approved.jsonl
+merge baseline/approved using archive message IDs
+write merged.jsonl
+export-snapshot-d1 --approved merged.jsonl
+ audit-safe --approved merged.jsonl --sql-dir snapshotSqlDir
 ```
 
-If `previousSnapshotId` is null on the first snapshot workflow, omit only the final `--previous-snapshot-id` pair. Parse aggregate JSON stdout only; never include review/approved content in errors/reports.
+Baseline `keywords_json` is parsed to `keywords`; approved overlay keeps deterministic `id/memory_ref`; retained rows keep `created_at/updated_at` when snapshot exporter supports them. All work files stay under run `work/`.
 
-- [ ] **Step 4: Run maintenance + Safe suites**
+- [ ] **Step 4: Verify maintenance + Safe suites**
 
 ```powershell
 cd teddy-memory-maintenance
@@ -416,309 +393,141 @@ npm test
 npm run smoke
 ```
 
-Expected: PASS.
-
 - [ ] **Step 5: Commit**
 
 ```bash
-git add teddy-memory-maintenance/src/safe-build.js teddy-memory-maintenance/test/safe-build.test.js
-git commit -m "feat: automate safe corpus rebuild"
+git add teddy-memory-maintenance/src/safe-build.js teddy-memory-maintenance/src/safe-merge.js teddy-memory-maintenance/test/safe-build.test.js teddy-memory-maintenance/test/safe-merge.test.js
+git commit -m "feat: conservatively rebuild safe memory"
 ```
 
-### Task 6: Add Safe snapshot promotion, remote validation, rollback, and retention orchestration
+### Task 8: Stage, cut over, finalize, rollback, and clean Safe snapshots
 
 **Files:**
 - Create: `teddy-memory-maintenance/src/safe-promotion.js`
 - Create: `teddy-memory-maintenance/test/safe-promotion.test.js`
 
 **Interfaces:**
-- Produces: `stageSafeSnapshot({ d1, database, ownerId, snapshotId, sqlDir, expectedCount, dryRun }) -> Promise<{ changed, previousSnapshotId, stagedSnapshotId }>`.
-- Produces: `activateAndVerifySafeSnapshot({ d1, database, ownerId, stagedSnapshotId, previousSnapshotId, sqlDir, verifyLive }) -> Promise<{ activeSnapshotId }>`.
-- Produces: `cleanupSafeSnapshots({ d1, database, cleanupSql }) -> Promise<void>`.
+- `stageSafeSnapshot(...)`
+- `cutoverVerifyFinalizeSafeSnapshot(...)`
+- `cleanupSafeSnapshots(...)`.
 
-- [ ] **Step 1: Write RED tests for dry-run, failed load, successful cutover, rollback, cleanup timing**
+- [ ] **Step 1: RED lifecycle tests**
 
-Required behavior:
+Require:
 
 ```text
-DryRun -> remote SELECTs only; no execute/executeFile.
-Stage load mismatch -> no activation and no Private-write permission signal.
-Successful stage -> create/load batches -> mark-ready -> validate status/count -> return staged snapshot.
-Activation -> activate -> verifyLive.
-verifyLive failure -> execute rollback -> re-query old pointer -> throw maintenance failure.
-Cleanup -> callable only after successful live verification; never inside activation transaction.
+dry-run -> SELECT only
+stage -> execute 000/data/900; target must be ready and count match; pointer unchanged
+cutover -> execute 910 pointer only; pointer target; verifyLive
+verify PASS -> execute 920 finalize; target active, previous retired
+verify FAIL -> execute 930 rollback; pointer previous, target failed
+cleanup -> only after successful finalize
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [ ] **Step 2: Run RED**
 
 ```powershell
 node --test test/safe-promotion.test.js
 ```
 
-Expected: FAIL.
+- [ ] **Step 3: Implement lifecycle orchestration**
 
-- [ ] **Step 3: Implement split staging/activation**
+Never combine bulk load with pointer switch. Preserve previous snapshot ID process-locally for rollback. After each state transition, query aggregate status/pointer and require exact expected values.
 
-`stageSafeSnapshot` queries and retains `previousSnapshotId` in process memory, executes create/data/mark-ready files but **not** activation, then requires target status `ready` and loaded count `expectedCount`.
-
-`activateAndVerifySafeSnapshot` executes `910-activate.sql`, re-queries pointer, runs `verifyLive`, and executes `920-rollback.sql` on verification failure before throwing.
-
-This split lets the overall runner stage and validate Safe content before writing Private D1.
-
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: Verify**
 
 ```powershell
 npm test
 ```
-
-Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add teddy-memory-maintenance/src/safe-promotion.js teddy-memory-maintenance/test/safe-promotion.test.js
-git commit -m "feat: automate safe snapshot promotion"
+git commit -m "feat: automate safe snapshot lifecycle"
 ```
 
-### Task 7: Probe the Private D1 schema and prove conversation-scoped identity compatibility before enabling writes
-
-**Files:**
-- Create: `teddy-memory-maintenance/src/private-import.js`
-- Create: `teddy-memory-maintenance/test/private-import.test.js`
-
-**Interfaces:**
-- Produces: `probePrivateSchema(d1, database) -> Promise<PrivateSchema>`.
-- Produces: `loadExistingMessageIdentityMap(d1, database) -> Promise<Map<compositeKey, archiveId>>` using only `id`, `conversation_id`, `original_message_id`.
-- Produces: `loadExistingPrivateRows(d1, database, schema) -> Promise<{ conversations: object[], messages: object[] }>`; captured content stays process-memory-only.
-- Produces: `archiveMessageId({ conversationId, originalMessageId, existingMap }) -> string`.
-- Composite key is exactly `${conversationId}\0${originalMessageId}`.
-- Existing composite keys always reuse current production `messages.id`; unseen composites use deterministic `msg_<32 hex sha256(conversationId\0originalMessageId)>` and are collision-checked against all existing IDs before write.
-
-- [ ] **Step 1: Write RED schema/identity tests**
-
-Recognize production table families `conversations`, `messages`, `memories`, `projects`, `project_memories`, `system_meta`; importer writes only `conversations` and `messages`.
-
-Require `messages` columns:
-
-```text
-id
-conversation_id
-original_message_id
-role
-content
-create_time
-sequence_index
-```
-
-and one retrievability column: `is_retrievable` or `retrievable`.
-
-```js
-const existing = new Map([
-  ['conv-a\0dup-id', 'legacy-a'],
-  ['conv-b\0dup-id', 'legacy-b'],
-]);
-assert.equal(archiveMessageId({ conversationId: 'conv-a', originalMessageId: 'dup-id', existingMap: existing }), 'legacy-a');
-assert.equal(archiveMessageId({ conversationId: 'conv-b', originalMessageId: 'dup-id', existingMap: existing }), 'legacy-b');
-```
-
-Test unseen composite IDs differ across conversations and remain stable across reruns. Test `loadExistingPrivateRows` data never passes to a report/write callback.
-
-- [ ] **Step 2: Run and verify RED**
-
-```powershell
-node --test test/private-import.test.js
-```
-
-Expected: FAIL because module does not exist.
-
-- [ ] **Step 3: Implement read-only schema/current-row probes**
-
-`probePrivateSchema` performs:
-
-```sql
-SELECT name, sql FROM sqlite_schema WHERE type='table' ORDER BY name;
-PRAGMA table_info(conversations);
-PRAGMA table_info(messages);
-```
-
-`loadExistingMessageIdentityMap` runs:
-
-```sql
-SELECT id, conversation_id, original_message_id FROM messages;
-```
-
-`loadExistingPrivateRows` selects only the supported conversation/message columns needed for local diff. It captures rows in process memory and never writes them to the aggregate manifest or console.
-
-- [ ] **Step 4: Run a real read-only compatibility probe against `teddy-memory-core`**
-
-Add the temporary/diagnostic `probe-private` CLI route in Task 9 before this operator step is executed, or invoke the exported functions from a one-line Node module command during Task 7 execution. Require remote production aggregate baseline 757 conversations / 14,546 messages / 14,545 retrievable.
-
-Normalize the current known export and require the same counts. If normalization differs, stop; add a synthetic regression test and fix Task 2 logic before any Private write implementation is exercised.
-
-- [ ] **Step 5: Commit read-only compatibility support**
-
-```bash
-git add teddy-memory-maintenance/src/private-import.js teddy-memory-maintenance/test/private-import.test.js
-git commit -m "feat: verify private archive identity compatibility"
-```
-
-### Task 8: Generate additive/upsert Private D1 SQL with no-delete semantics
-
-**Files:**
-- Modify: `teddy-memory-maintenance/src/private-import.js`
-- Modify: `teddy-memory-maintenance/test/private-import.test.js`
-
-**Interfaces:**
-- Produces: `planPrivateImport({ normalized, schema, existingIdentityMap, existingRows, outDir, batchSize = 200 }) -> Promise<{ stats, sqlFiles }>`.
-- `stats`: aggregate `newConversations`, `changedConversations`, `newMessages`, `changedMessages`, `deleted: 0`.
-- No SQL batch contains `DELETE`, `DROP`, `TRUNCATE`, or writes to `memories`, `projects`, `project_memories`, `system_meta`.
-
-- [ ] **Step 1: Write RED import-plan tests**
-
-Test one existing unchanged message, one changed existing message, one new message, and one old remote message absent from the new export. The absent remote row is untouched and `deleted=0`.
-
-Assert existing-row upsert retains the mapped legacy `messages.id`; new rows use deterministic conversation-scoped `msg_<hash>` ID.
-
-- [ ] **Step 2: Run and verify RED**
-
-```powershell
-node --test test/private-import.test.js
-```
-
-Expected: FAIL because planning/SQL generation is not implemented.
-
-- [ ] **Step 3: Implement exact-column adaptive upserts**
-
-Generate `INSERT ... ON CONFLICT(id) DO UPDATE` only for columns present in the probed production schema. Conversation upserts require `id` and `title`; include `create_time`/`update_time` only when those columns exist. Message upserts use required production columns plus the detected retrievability column.
-
-Reuse/export the tested `sqlLiteral` behavior from `teddy-memory-safe/src/d1-export.js` rather than implementing a second escaping algorithm. Batch at 200 rows/file under the gitignored run directory. Never print SQL containing content.
-
-- [ ] **Step 4: Run tests and destructive-SQL scan**
-
-```powershell
-npm test
-```
-
-Expected: PASS; tests reject destructive/private-unrelated table statements.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add teddy-memory-maintenance/src/private-import.js teddy-memory-maintenance/test/private-import.test.js
-git commit -m "feat: generate additive private memory upserts"
-```
-
-### Task 9: Add the ordered end-to-end maintenance runner with dry-run/no-change semantics
+### Task 9: Add end-to-end maintenance runner, dry-run, and NO_CHANGES path
 
 **Files:**
 - Create: `teddy-memory-maintenance/src/verify.js`
 - Create: `teddy-memory-maintenance/src/run.js`
 - Create: `teddy-memory-maintenance/src/cli.mjs`
 - Create: `teddy-memory-maintenance/test/run.test.js`
-- Modify: `teddy-memory-maintenance/package.json` — final smoke imports `run.js`, `verify.js`, and `cli.mjs`.
+- Modify: `teddy-memory-maintenance/package.json`
 
 **Interfaces:**
-- Produces: `runMaintenance({ zipPath, extractedDir, dryRun, allowLargeRegression, config, dependencies }) -> Promise<MaintenanceReport>`.
-- CLI commands:
-  - `node src/cli.mjs run --zip <zip> --extracted <dir> [--dry-run true] [--allow-large-regression true]`
-  - `node src/cli.mjs probe-private --extracted <dir>`.
+- `runMaintenance({zipPath,extractedDir,dryRun,allowLargeRegression,config,dependencies})`
+- CLI `run` and `probe-private`.
 
-- [ ] **Step 1: Write RED orchestration tests**
+- [ ] **Step 1: RED ordered workflow tests**
 
-Required order for a changed normal run:
+Changed normal run order is exactly:
 
 ```text
-hash/read export
-normalize
-load prior manifest
-regression gate
-probe/read private remote
-plan private import
-build safe corpus
-read current safe pointer
-stage/load Safe snapshot (not active)
-validate Safe snapshot ready/count
-write Private upsert batches
-activate Safe snapshot
-public OAuth/MCP verify
-private aggregate verify
-write successful manifest/report
-cleanup old Safe snapshots
+hash/locate/normalize
+load previous aggregate manifest + regression gate
+load Private archive identity/schema/current rows
+materialize archive IDs + plan Private upserts
+load current active Safe baseline/pointer
+Safe build + conservative merge + audit + snapshot SQL
+stage Safe snapshot and require ready/count
+execute Private upsert batches
+cut Safe pointer -> OAuth/MCP compatibility verify -> finalize statuses (rollback pointer on failure)
+verify expected Private aggregate counts
+verify pointed Safe aggregate count
+write successful aggregate manifest/report
+cleanup old retired Safe snapshots
 ```
 
-Dry-run performs all local stages and remote read-only probes but no D1 writes. Same-export mode performs read-only verification and returns `NO_CHANGES` without rebuilding or writing production.
+Same SHA: no build/write; perform read-only Private/Safe/public health verification then return `NO_CHANGES`. Dry-run executes all local build/merge/audit and remote reads but no `execute/executeFile`.
 
-If Safe staging fails, Private is not written. If Private write fails, Safe remains staged/ready but inactive. If post-activation public verification fails, Safe pointer rolls back; Private may already contain additive/upsert updates, which are non-destructive and will be reconciled by the next successful Safe publication.
-
-- [ ] **Step 2: Run and verify RED**
+- [ ] **Step 2: Run RED**
 
 ```powershell
 node --test test/run.test.js
 ```
 
-Expected: FAIL because runner does not exist.
+- [ ] **Step 3: Implement with injected dependencies**
 
-- [ ] **Step 3: Implement orchestration with injected dependencies**
+`verify.js` exports aggregate-only `verifyPrivateCounts`, `verifySafeActiveSnapshot`, `verifyPluginCompatibility`. The runner writes the success manifest only after all verifications/finalize pass. If Private write fails, staged Safe remains inactive. If post-cutover verify fails, Safe rolls back; additive Private upserts remain non-destructive and the run is reported failed without writing a success manifest.
 
-`verify.js` exports exact aggregate methods:
+Update `smoke` to import/check all runtime modules.
 
-```js
-export async function verifyPrivateCounts({ d1, database, expected }) {}
-export async function verifySafeActiveSnapshot({ d1, database, ownerId, expectedCount }) {}
-export async function verifyPluginCompatibility({ runCompatibility }) {}
-```
-
-Each returns aggregate booleans/counts only. The top-level runner writes a successful manifest only after Safe live verification and Private aggregate verification pass.
-
-Update `package.json` smoke to:
-
-```json
-"smoke": "node --check src/cli.mjs && node --check src/run.js && node --check src/verify.js && node --input-type=module -e \"await import('./src/run.js'); await import('./src/verify.js'); await import('./src/report.js')\""
-```
-
-- [ ] **Step 4: Run all maintenance tests/smoke**
+- [ ] **Step 4: Verify**
 
 ```powershell
 npm test
 npm run smoke
 ```
 
-Expected: PASS.
-
 - [ ] **Step 5: Commit**
 
 ```bash
-git add teddy-memory-maintenance/src/verify.js teddy-memory-maintenance/src/run.js teddy-memory-maintenance/src/cli.mjs teddy-memory-maintenance/test/run.test.js teddy-memory-maintenance/package.json
-git commit -m "feat: orchestrate one-click memory maintenance"
+git add teddy-memory-maintenance/src teddy-memory-maintenance/test teddy-memory-maintenance/package.json
+git commit -m "feat: orchestrate one-click memory refresh"
 ```
 
-### Task 10: Add the Windows double-click launcher and file picker/extraction path
+### Task 10: Add Windows double-click ZIP picker/extractor
 
 **Files:**
 - Create: `UPDATE_TEDDY_MEMORY.cmd`
 - Create: `Update-Teddy-Memory.ps1`
 - Create: `teddy-memory-maintenance/test/windows-entry.test.js`
 
-**Interfaces:**
-- PowerShell parameters: `-Zip <path>`, `-DryRun`, `-AllowLargeRegression`.
-- If `-Zip` absent, show one `.zip` file picker.
-- Extract to `teddy-memory-maintenance\work\runs\<UTC timestamp>\extracted`.
+- [ ] **Step 1: RED static launcher tests**
 
-- [ ] **Step 1: Write RED static entry-point tests**
+Require `-Zip`, `-DryRun`, `-AllowLargeRegression`, OpenFileDialog when ZIP absent, Node >=22 check, `Expand-Archive`, gitignored run path, argument-array Node invocation, and no environment/secret echo.
 
-Require `.cmd` to call PowerShell with `-File` and forward `%*`. Require `.ps1` to define all three parameters, use `System.Windows.Forms.OpenFileDialog`, `Expand-Archive`, a work path under `teddy-memory-maintenance/work`, and never echo environment variables.
-
-- [ ] **Step 2: Run and verify RED**
+- [ ] **Step 2: Run RED**
 
 ```powershell
 node --test test/windows-entry.test.js
 ```
 
-Expected: FAIL because scripts do not exist.
+- [ ] **Step 3: Implement**
 
-- [ ] **Step 3: Implement exact launcher behavior**
-
-`UPDATE_TEDDY_MEMORY.cmd`:
+`.cmd`:
 
 ```bat
 @echo off
@@ -727,54 +536,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Update-Teddy-Memor
 exit /b %ERRORLEVEL%
 ```
 
-PowerShell structure:
+PowerShell resolves `$PSScriptRoot`, selects/resolves ZIP, creates `teddy-memory-maintenance\work\runs\<UTC>\extracted`, expands ZIP, runs `npm install` only when local dependencies are missing, preserves proxy support with `NODE_USE_ENV_PROXY=1` when proxy env exists, and invokes `node src/cli.mjs run` with an argument array.
 
-```powershell
-param(
-  [string]$Zip,
-  [switch]$DryRun,
-  [switch]$AllowLargeRegression
-)
-$ErrorActionPreference = 'Stop'
-$Repo = $PSScriptRoot
-$Maintenance = Join-Path $Repo 'teddy-memory-maintenance'
-
-if (-not $Zip) {
-  Add-Type -AssemblyName System.Windows.Forms
-  $dialog = New-Object System.Windows.Forms.OpenFileDialog
-  $dialog.Filter = 'OpenAI export ZIP (*.zip)|*.zip'
-  $dialog.Multiselect = $false
-  if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { exit 2 }
-  $Zip = $dialog.FileName
-}
-$Zip = (Resolve-Path $Zip).Path
-$runId = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
-$runDir = Join-Path $Maintenance (Join-Path 'work\runs' $runId)
-$extracted = Join-Path $runDir 'extracted'
-New-Item -ItemType Directory -Force -Path $extracted | Out-Null
-Expand-Archive -LiteralPath $Zip -DestinationPath $extracted -Force
-
-Push-Location $Maintenance
-try {
-  if (-not (Test-Path 'node_modules\wrangler\bin\wrangler.js')) { npm install }
-  if ($env:HTTP_PROXY -or $env:HTTPS_PROXY -or $env:http_proxy -or $env:https_proxy) {
-    $env:NODE_USE_ENV_PROXY = '1'
-  }
-  $argsList = @('src/cli.mjs','run','--zip',$Zip,'--extracted',$extracted)
-  if ($DryRun) { $argsList += @('--dry-run','true') }
-  if ($AllowLargeRegression) { $argsList += @('--allow-large-regression','true') }
-  & node @argsList
-  exit $LASTEXITCODE
-} finally {
-  Pop-Location
-}
-```
-
-Task implementation must also parse `node --version` and fail before extraction/production work when major version is below 22.
-
-- [ ] **Step 4: Run static tests and a synthetic ZIP dry-run**
-
-Generate a synthetic ZIP from the tracked synthetic fixture inside the test setup, then run:
+- [ ] **Step 4: Verify static tests + synthetic ZIP dry-run**
 
 ```powershell
 cd teddy-memory-maintenance
@@ -782,55 +546,25 @@ npm test
 ..\Update-Teddy-Memory.ps1 -Zip ".\work\test-fixtures\synthetic-export.zip" -DryRun
 ```
 
-Expected: no production write calls and aggregate dry-run result.
-
 - [ ] **Step 5: Commit**
 
 ```bash
 git add UPDATE_TEDDY_MEMORY.cmd Update-Teddy-Memory.ps1 teddy-memory-maintenance/test/windows-entry.test.js
-git commit -m "feat: add one-click windows maintenance entry"
+git commit -m "feat: add one-click memory updater"
 ```
 
-### Task 11: Add CI that guards the new package and both dependent subsystems
+### Task 11: Add cross-package CI
 
 **Files:**
 - Create: `.github/workflows/teddy-memory-maintenance.yml`
 
-**Interfaces:**
-- CI runs on changes under maintenance, Safe, Plugin, root launcher, and Plan 4 docs.
+- [ ] **Step 1: Add Node 22 workflow**
 
-- [ ] **Step 1: Add workflow with explicit gates**
+Run `npm ci/test/smoke` for maintenance (lockfile tracked), `npm install/test/smoke` for Safe, and `npm install/test/smoke/cf:dry-run` for Plugin.
 
-```yaml
-- uses: actions/checkout@v4
-- uses: actions/setup-node@v4
-  with:
-    node-version: 22
-- run: npm ci
-  working-directory: teddy-memory-maintenance
-- run: npm test
-  working-directory: teddy-memory-maintenance
-- run: npm run smoke
-  working-directory: teddy-memory-maintenance
-- run: npm install
-  working-directory: teddy-memory-safe
-- run: npm test
-  working-directory: teddy-memory-safe
-- run: npm run smoke
-  working-directory: teddy-memory-safe
-- run: npm install
-  working-directory: teddy-memory-plugin
-- run: npm test
-  working-directory: teddy-memory-plugin
-- run: npm run smoke
-  working-directory: teddy-memory-plugin
-- run: npm run cf:dry-run
-  working-directory: teddy-memory-plugin
-```
+- [ ] **Step 2: Push and require green workflow**
 
-- [ ] **Step 2: Push and require workflow success**
-
-Expected all jobs green. No real exports/secrets are available or required in CI.
+No real exports or secrets in CI.
 
 - [ ] **Step 3: Commit**
 
@@ -839,51 +573,34 @@ git add .github/workflows/teddy-memory-maintenance.yml
 git commit -m "ci: verify teddy memory maintenance"
 ```
 
-### Task 12: Run production-safe acceptance on the current known export before trusting the next twice-monthly update
+### Task 12: Production-safe acceptance on current baseline
 
 **Files:**
-- Modify: `README.md`
 - Create: `teddy-memory-maintenance/README.md`
+- Modify: `README.md`
 - Modify: `TEDDY_MEMORY_PLUGIN_ROADMAP.md`
 
-**Interfaces:**
-- Current baseline acceptance: Private 757 / 14,546 / 14,545; Safe active snapshot 4,227; OAuth/MCP live smoke known-good before Plan 4.
+- [ ] **Step 1: Run current known export in DryRun**
 
-- [ ] **Step 1: Run `-DryRun` on the same current OpenAI export that produced the deployed baseline**
+Require normalized/materialized Private baseline `757 / 14546 / 14545`, zero duplicate/collision errors, Safe conservative merge count 4,227 for the current unchanged source, Safe audit PASS, production changed `no`.
 
-Expected:
+- [ ] **Step 2: Run same current ZIP in normal mode**
 
-```text
-Private identity compatibility: PASS
-Private planned duplicates: 0
-Safe local audit: PASS
-Production changed: no (dry-run)
-```
+Expected no Private content changes and no unnecessary new Safe snapshot; write initial success manifest if absent.
 
-If normalized counts differ from 757 / 14,546 / 14,545, stop and fix normalization/identity compatibility before write-mode acceptance.
+- [ ] **Step 3: Run same ZIP again**
 
-- [ ] **Step 2: Run a no-change normal maintenance pass on the same ZIP**
+Expected `NO_CHANGES` with read-only verification only.
 
-Expected initial manifest creation with no content changes or subsequent `NO_CHANGES`; no duplicate Private rows and no unnecessary new Safe active snapshot.
+- [ ] **Step 4: Run `npm run compat:chatgpt`**
 
-- [ ] **Step 3: Reverify production aggregates and compatibility**
+Require full compatibility matrix PASS; do not equate this with ChatGPT product UI availability.
 
-Require Private counts unchanged at baseline and Safe active snapshot count 4,227. Run:
+- [ ] **Step 5: Reverify production aggregates**
 
-```powershell
-cd D:\Knowledge-Chatgpt\teddy-memory-plugin
-npm run compat:chatgpt
-```
+Private remains 757/14546/14545; Safe pointed active rows remain 4,227; active principal mapping remains 1. Prove rollback only in synthetic tests, never by intentionally failing production.
 
-Expected compatibility matrix PASS.
-
-- [ ] **Step 4: Prove rollback only in tests/synthetic environment**
-
-Inject a failing post-cutover verifier and require active Safe pointer to return to the previous snapshot. Do not intentionally fail production.
-
-- [ ] **Step 5: Document the future routine**
-
-Recurring README procedure is exactly:
+- [ ] **Step 6: Document four-step recurring operation and commit**
 
 ```text
 1. Download OpenAI data export ZIP.
@@ -891,10 +608,6 @@ Recurring README procedure is exactly:
 3. Choose the ZIP.
 4. Wait for COMPLETE / NO_CHANGES.
 ```
-
-Troubleshooting states `ABORTED` means production writes were prevented or the Safe pointer was rolled back; direct manual SQL is not the first recovery action.
-
-- [ ] **Step 6: Commit docs**
 
 ```bash
 git add README.md teddy-memory-maintenance/README.md TEDDY_MEMORY_PLUGIN_ROADMAP.md
