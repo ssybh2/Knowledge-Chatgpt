@@ -7,6 +7,7 @@ import { buildCandidate } from './candidates.js';
 import { compileApprovedMemory } from './approval.js';
 import { scanCandidateFields, scanRestrictedText } from './policy.js';
 import { writeD1Batches } from './d1-export.js';
+import { writeSnapshotBatches } from './snapshot-export.js';
 
 const CATEGORIES = new Set(['project', 'learning', 'decision', 'plan', 'preference', 'reference']);
 const PRIVATE_ID_MARKERS = ['conversation_id', 'message_id', 'source_archive_id', 'source_conversation_id', 'original_message_id'];
@@ -251,6 +252,34 @@ async function exportD1(options, io) {
   return 0;
 }
 
+async function exportSnapshotD1(options, io) {
+  const approvedPath = requireOption(options, 'approved');
+  const ownerId = requireOption(options, 'owner');
+  const snapshotId = requireOption(options, 'snapshot-id');
+  const outDir = requireOption(options, 'out-dir');
+  const batchSize = positiveInt(options['batch-size'], 'batch-size', 100);
+  const previousSnapshotId = options['previous-snapshot-id'] === undefined
+    ? null
+    : requireOption(options, 'previous-snapshot-id');
+  const rows = [];
+  for await (const row of readJsonl(approvedPath)) rows.push(validateApprovedRow(row));
+  const result = await writeSnapshotBatches(rows, {
+    ownerId,
+    snapshotId,
+    previousSnapshotId,
+    outDir,
+    batchSize,
+  });
+  writeJson(io.stdout, {
+    ok: true,
+    command: 'export-snapshot-d1',
+    records: result.recordCount,
+    batches: result.memoryBatches,
+    sql_files: result.files.length,
+  });
+  return 0;
+}
+
 async function auditSafe(options, io) {
   const approvedPath = requireOption(options, 'approved');
   const sqlDir = requireOption(options, 'sql-dir');
@@ -338,9 +367,10 @@ export async function main(argv = process.argv.slice(2), io = { stdout: process.
     if (command === 'compile-approved') return await compileApproved(options, io);
     if (command === 'compile-auto-safe') return await compileAutoSafe(options, io);
     if (command === 'export-d1') return await exportD1(options, io);
+    if (command === 'export-snapshot-d1') return await exportSnapshotD1(options, io);
     if (command === 'audit-safe') return await auditSafe(options, io);
     if (command === 'stats') return await stats(options, io);
-    throw new TypeError('command must be build-candidates, compile-approved, compile-auto-safe, export-d1, audit-safe, or stats');
+    throw new TypeError('command must be build-candidates, compile-approved, compile-auto-safe, export-d1, export-snapshot-d1, audit-safe, or stats');
   } catch (error) {
     io.stderr.write(`Error: ${String(error?.message || 'operation failed')}\n`);
     return 1;
