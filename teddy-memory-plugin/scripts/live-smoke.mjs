@@ -155,6 +155,7 @@ export async function runLiveSmoke({
   assertCondition(searchPayload.result?.isError !== true, 'search_memory returned a tool error');
   const memories = searchPayload.result?.structuredContent?.memories;
   assertCondition(Array.isArray(memories), 'search_memory did not return memories[]');
+  assertCondition(memories.length > 0, 'search_memory returned no safe memories for the technical smoke query');
   for (const memory of memories) assertNoInternalFields(memory);
 
   const unknownPayload = await postMcp({
