@@ -35,7 +35,7 @@ test('renderUpsert serializes safe fields only', () => {
   assert.ok(!sql.includes('also-private'));
 });
 
-test('batch size 2 over 5 records creates three deterministic SQL files', async () => {
+test('batch size 2 over 5 records creates three deterministic D1-compatible SQL files', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'teddy-d1-'));
   const files = await writeD1Batches([memory(1), memory(2), memory(3), memory(4), memory(5)], {
     outDir: dir,
@@ -48,7 +48,7 @@ test('batch size 2 over 5 records creates three deterministic SQL files', async 
     '003-safe-memories.sql',
   ]);
   const first = await readFile(files[0], 'utf8');
-  assert.ok(first.startsWith('BEGIN TRANSACTION;\n'));
-  assert.ok(first.endsWith('COMMIT;\n'));
+  assert.ok(!/BEGIN\s+TRANSACTION/i.test(first));
+  assert.ok(!/^\s*COMMIT\s*;/im.test(first));
   assert.equal((first.match(/INSERT INTO safe_memories/g) || []).length, 2);
 });
