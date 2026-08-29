@@ -12,7 +12,7 @@ teddy-memory-api                         teddy-memory-safe
        │                                      │
 teddy-memory-mcp                         teddy-memory-plugin-safe D1
        │                                      │
-受控私人客户端                            future teddy-memory-plugin
+受控私人客户端                            teddy-memory-plugin
 ```
 
 完整私人档案不会为了公开 Plugin 审核而删减；公开 Plugin 也不会获得读取完整私人 D1 的技术路径。
@@ -58,7 +58,7 @@ teddy-memory-mcp                         teddy-memory-plugin-safe D1
 docs/superpowers/specs/2026-08-29-teddy-memory-dual-track-plugin-design.md
 ```
 
-## 4. Plan 1 — Safe corpus + separate D1
+## 4. Plan 1 — Safe corpus + separate D1 — COMPLETE
 
 实施计划：
 
@@ -66,13 +66,13 @@ docs/superpowers/specs/2026-08-29-teddy-memory-dual-track-plugin-design.md
 docs/superpowers/plans/2026-08-29-teddy-memory-safe-corpus.md
 ```
 
-当前实现位于：
+实现位于：
 
 ```text
 teddy-memory-safe/
 ```
 
-已完成：
+工程与安全边界：
 
 ```text
 [x] Node.js 22 safe-pipeline package
@@ -101,12 +101,29 @@ teddy-memory-safe/
 [x] local private-output gitignore boundary
 [x] independent GitHub Actions workflow
 [x] operator README
-[ ] first local real-data 100-candidate dry run
-[ ] manually approve only 5–20 clearly safe memories
-[ ] inspect approved JSONL and generated SQL locally
-[ ] create physically separate D1 `teddy-memory-plugin-safe`
-[ ] import the first manually reviewed safe corpus
-[ ] verify the existing private MCP still works unchanged after safe-D1 creation
+```
+
+2026-08-29 实际 Safe Corpus 结果：
+
+```text
+scanned messages: 14546
+invalid:          84
+candidates:       4568
+blocked:          341
+approved:         4227
+```
+
+完成 gate：
+
+```text
+[x] real-data safe-corpus pipeline completed locally
+[x] final approved corpus passed the final restricted-data audit
+[x] approved public rows contain no private source IDs
+[x] physically separate D1 `teddy-memory-plugin-safe` created
+[x] 4227 approved safe memories imported into the separate D1
+[x] all 4227 rows are owner-scoped to `teddy-primary`
+[x] all 4227 rows are active
+[x] private Full Memory Track remains physically and logically separate
 ```
 
 The real review queue, decisions, approved corpus, generated SQL and source export are local-only and must never be committed.
@@ -120,13 +137,13 @@ private: teddy-memory-core
 safe:    teddy-memory-plugin-safe
 ```
 
-The future public Plugin Worker must bind only `teddy-memory-plugin-safe`. It must not bind `teddy-memory-core`, must not receive `MEMORY_API_KEY`, and must not call `teddy-memory-api` as a fallback.
+The public Plugin Worker binds only `teddy-memory-plugin-safe`. It does not bind `teddy-memory-core`, does not receive `MEMORY_API_KEY`, and does not call `teddy-memory-api` as a fallback.
 
-## 6. Planned public Plugin tools
+## 6. Public Plugin tools
 
-The public Plugin will not expose full historical conversations.
+The public Plugin does not expose full historical conversations.
 
-Planned v1 tools:
+Plan 2 v1 tools：
 
 - `get_context`
 - `search_memory`
@@ -139,32 +156,71 @@ Not exposed on public track:
 - raw archive retrieval
 - Cloudflare administration
 
-## 7. Plan 2 — teddy-memory-plugin MCP Worker
+## 7. Plan 2 — teddy-memory-plugin MCP Worker — COMPLETE
 
-Start only after Plan 1 completion gate passes.
+Implementation plan:
 
-Plan 2 will implement a new Cloudflare Worker backed directly by `teddy-memory-plugin-safe` with owner-scoped, read-only queries and response minimization. Authentication can initially be isolated behind a test identity boundary so query/data isolation is verified before OAuth complexity is introduced.
+```text
+docs/superpowers/plans/2026-08-29-teddy-memory-plugin-worker.md
+```
 
-Target host:
+The Worker is backed directly and exclusively by `teddy-memory-plugin-safe` with owner-scoped, read-only queries, prepared SQL bindings, response minimization, and a restricted-query guard that runs before D1 access.
+
+Plan 2 staging authentication uses `PLUGIN_DEV_ACCESS_TOKEN` plus `PLUGIN_DEV_OWNER_ID=teddy-primary`. This bearer gate is intentionally temporary and is not the final ChatGPT account-linking mechanism.
+
+Target / deployed host:
 
 ```text
 https://teddy-memory-plugin.3767174214.workers.dev
 ```
 
-## 8. Plan 3 — Auth0 / OAuth 2.1
+2026-08-29 live deployment verification:
 
-After safe-D1 query behavior is verified:
+```text
+[x] Cloudflare deployment succeeded
+[x] /healthz returned HTTP 200 with minimal service health JSON
+[x] anonymous POST /mcp returned HTTP 401
+[x] authenticated tools/list exposed exactly 3 tools
+[x] benign search_memory query executed successfully
+[x] live smoke printed only aggregate/non-content results
+[x] unknown opaque memory_ref returned neutral not-found behavior
+[x] post-read D1 verification remained exactly 4227 total rows
+[x] post-read D1 verification remained exactly 4227 teddy-primary rows
+[x] post-read D1 verification remained exactly 4227 active rows
+[x] GitHub Actions verification is green for tests, smoke, and Cloudflare dry-run
+[x] public Worker has no private D1 / private API fallback path
+```
 
-- Auth0 Authorization Code + PKCE
+Recorded non-secret live-smoke result:
+
+```json
+{"health":true,"unauthorized":true,"tools":3,"search_result_count":4,"unknown_ref_not_found":true}
+```
+
+Recorded post-read D1 aggregate verification:
+
+```text
+total=4227
+teddy_primary=4227
+active=4227
+```
+
+No staging bearer token, Cloudflare credential, private-memory credential, safe-corpus source material, or memory body is recorded in this repository.
+
+## 8. Plan 3 — Auth0 / OAuth 2.1 — PENDING
+
+Next phase after Plan 2:
+
+- Auth0 Authorization Code + PKCE S256
 - `memory:read` scope only
 - OAuth subject -> plugin `owner_id`
 - issuer / audience / expiry / scope validation
 - OAuth protected-resource discovery
 - reviewer demo account with synthetic corpus only
 
-`MCP_ACCESS_TOKEN` remains a private-track credential and is not the final public Plugin login mechanism.
+`PLUGIN_DEV_ACCESS_TOKEN` remains a Plan 2 staging gate only. `MCP_ACCESS_TOKEN` remains a private-track credential. Neither is the final public Plugin login mechanism.
 
-## 9. Plan 4 — Plugin submission package
+## 9. Plan 4 — Plugin submission package — PENDING
 
 Prepare:
 
