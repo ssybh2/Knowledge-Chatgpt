@@ -50,9 +50,7 @@ export async function writeD1Batches(records, { outDir, batchSize = 100, nowSeco
     const chunk = rows.slice(start, start + batchSize);
     const file = join(outDir, `${String(index).padStart(3, '0')}-safe-memories.sql`);
     const body = [
-      'BEGIN TRANSACTION;',
       ...chunk.map((row) => renderUpsert(row, nowSeconds)),
-      'COMMIT;',
       '',
     ].join('\n');
     await writeFile(file, body, 'utf8');
