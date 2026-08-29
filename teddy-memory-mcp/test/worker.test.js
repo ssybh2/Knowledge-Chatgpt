@@ -56,7 +56,12 @@ test('worker keeps client bearer auth separate from backend auth and routes back
   env.TEDDY_MEMORY_API = {
     async fetch(request) {
       serviceFetchCalls += 1;
+      assert.ok(request instanceof Request);
       assert.equal(new URL(request.url).pathname, '/v1/context');
+      assert.equal(request.method, 'POST');
+      assert.equal(request.headers.get('authorization'), 'Bearer backend-secret');
+      assert.equal(request.headers.get('content-type'), 'application/json');
+      assert.equal(await request.text(), JSON.stringify({ query: 'EtherCAT' }));
       return new Response(JSON.stringify({ ok: true }), {
         headers: { 'content-type': 'application/json' },
       });
@@ -89,7 +94,14 @@ test('worker keeps client bearer auth separate from backend auth and routes back
   assert.equal(seenConfig.timeoutMs, 9000);
   assert.equal(typeof seenConfig.fetchImpl, 'function');
 
-  await seenConfig.fetchImpl(new Request('https://backend.example.com/v1/context'));
+  await seenConfig.fetchImpl(new URL('https://backend.example.com/v1/context'), {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer backend-secret',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ query: 'EtherCAT' }),
+  });
   assert.equal(serviceFetchCalls, 1);
 });
 
