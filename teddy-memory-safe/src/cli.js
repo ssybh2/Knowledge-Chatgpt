@@ -182,16 +182,23 @@ async function stats(options, io) {
   const path = requireOption(options, 'file');
   let records = 0;
   let blocked = 0;
+  const blockedReasons = {};
   const decisions = { pending: 0, approve: 0, reject: 0, other: 0 };
   for await (const row of readJsonl(path)) {
     records += 1;
-    if (Array.isArray(row.blocked_reasons) && row.blocked_reasons.length) blocked += 1;
+    if (Array.isArray(row.blocked_reasons) && row.blocked_reasons.length) {
+      blocked += 1;
+      for (const reason of row.blocked_reasons) {
+        const key = String(reason);
+        blockedReasons[key] = (blockedReasons[key] || 0) + 1;
+      }
+    }
     if (row.decision === 'pending') decisions.pending += 1;
     else if (row.decision === 'approve') decisions.approve += 1;
     else if (row.decision === 'reject') decisions.reject += 1;
     else if (row.decision !== undefined) decisions.other += 1;
   }
-  writeJson(io.stdout, { ok: true, command: 'stats', records, blocked, decisions });
+  writeJson(io.stdout, { ok: true, command: 'stats', records, blocked, blocked_reasons: blockedReasons, decisions });
   return 0;
 }
 
