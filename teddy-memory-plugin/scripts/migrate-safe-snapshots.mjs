@@ -8,6 +8,13 @@ const EXPECTED_SAFE_ROWS = 4227;
 const OWNER_ID = 'teddy-primary';
 const DATABASE = 'teddy-memory-plugin-safe';
 const LEGACY_SNAPSHOT = 'snap_legacy_seed_v1';
+const PUBLIC_OAUTH = Object.freeze({
+  issuer: 'https://dev-32xguyuwp0wrwddr.us.auth0.com/',
+  clientId: '1hN8PGhbAUGzOvyJOkF7gObHiDE318qA',
+  pluginBaseUrl: 'https://teddy-memory-plugin.3767174214.workers.dev',
+  resource: 'https://teddy-memory-plugin.3767174214.workers.dev/mcp',
+  redirectUri: 'http://localhost:8789/callback',
+});
 const PLUGIN_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const WRANGLER_JS = fileURLToPath(new URL('../node_modules/wrangler/bin/wrangler.js', import.meta.url));
 const SCHEMA_SQL = fileURLToPath(new URL('../sql/002_safe_snapshots.sql', import.meta.url));
@@ -18,12 +25,6 @@ const PRINCIPAL_SQL = `SELECT COUNT(*) AS active_principals FROM oauth_principal
 const SNAPSHOT_SQL = `SELECT s.snapshot_id, s.record_count, s.status, COUNT(m.memory_ref) AS loaded FROM safe_snapshots s LEFT JOIN safe_snapshot_memories m ON m.snapshot_id=s.snapshot_id AND m.owner_id=s.owner_id WHERE s.snapshot_id='${LEGACY_SNAPSHOT}' AND s.owner_id='${OWNER_ID}' GROUP BY s.snapshot_id,s.record_count,s.status;`;
 const POINTER_SQL = `SELECT owner_id, snapshot_id FROM safe_active_snapshot WHERE owner_id='${OWNER_ID}';`;
 const ACTIVE_ROWS_SQL = `SELECT COUNT(*) AS active_rows FROM safe_snapshot_memories m JOIN safe_active_snapshot a ON a.snapshot_id=m.snapshot_id AND a.owner_id=m.owner_id WHERE a.owner_id='${OWNER_ID}' AND m.is_active=1;`;
-
-function requiredText(value, name) {
-  const text = String(value ?? '').trim();
-  if (!text) throw new Error(`${name} is required`);
-  return text;
-}
 
 export async function runCommand(command, args, { cwd = PLUGIN_DIR, env = process.env } = {}) {
   return new Promise((resolve, reject) => {
@@ -46,9 +47,7 @@ export async function runCommand(command, args, { cwd = PLUGIN_DIR, env = proces
 }
 
 function ensureSuccess(result, label) {
-  if (!result || Number(result.code) !== 0) {
-    throw new Error(`${label} failed`);
-  }
+  if (!result || Number(result.code) !== 0) throw new Error(`${label} failed`);
   return result;
 }
 
@@ -59,7 +58,6 @@ export function parseD1Rows(stdout) {
   } catch {
     throw new Error('Wrangler D1 returned invalid JSON');
   }
-
   const queue = [payload];
   while (queue.length > 0) {
     const value = queue.shift();
@@ -104,9 +102,7 @@ async function executeFile(runCommandImpl, path, label) {
 
 function exactNumber(row, key, expected, label) {
   const actual = Number(row?.[key]);
-  if (!Number.isFinite(actual) || actual !== expected) {
-    throw new Error(`${label} mismatch: expected ${expected}`);
-  }
+  if (!Number.isFinite(actual) || actual !== expected) throw new Error(`${label} mismatch: expected ${expected}`);
   return actual;
 }
 
@@ -139,20 +135,13 @@ function assertPointer(rows) {
 
 async function defaultOAuthLogin({ write }) {
   return runOAuthLogin({
-    issuer: process.env.TEDDY_AUTH0_ISSUER || process.env.PLUGIN_OAUTH_ISSUER,
-    clientId: process.env.TEDDY_AUTH0_CLIENT_ID,
-    pluginBaseUrl: process.env.TEDDY_PLUGIN_URL,
-    resource: process.env.TEDDY_PLUGIN_RESOURCE,
-    redirectUri: process.env.TEDDY_AUTH0_REDIRECT_URI || 'http://localhost:8789/callback',
+    issuer: process.env.TEDDY_AUTH0_ISSUER || PUBLIC_OAUTH.issuer,
+    clientId: process.env.TEDDY_AUTH0_CLIENT_ID || PUBLIC_OAUTH.clientId,
+    pluginBaseUrl: process.env.TEDDY_PLUGIN_URL || PUBLIC_OAUTH.pluginBaseUrl,
+    resource: process.env.TEDDY_PLUGIN_RESOURCE || PUBLIC_OAUTH.resource,
+    redirectUri: process.env.TEDDY_AUTH0_REDIRECT_URI || PUBLIC_OAUTH.redirectUri,
     write,
   });
-}
-
-function validateOAuthPreflight() {
-  requiredText(process.env.TEDDY_AUTH0_ISSUER || process.env.PLUGIN_OAUTH_ISSUER, 'TEDDY_AUTH0_ISSUER');
-  requiredText(process.env.TEDDY_AUTH0_CLIENT_ID, 'TEDDY_AUTH0_CLIENT_ID');
-  requiredText(process.env.TEDDY_PLUGIN_URL, 'TEDDY_PLUGIN_URL');
-  requiredText(process.env.TEDDY_PLUGIN_RESOURCE, 'TEDDY_PLUGIN_RESOURCE');
 }
 
 export async function runProductionSafeSnapshotMigration({
@@ -160,14 +149,12 @@ export async function runProductionSafeSnapshotMigration({
   oauthLoginImpl = defaultOAuthLogin,
   write = (line) => console.log(line),
   expectedSafeRows = EXPECTED_SAFE_ROWS,
-  skipOAuthEnvPreflight = runCommandImpl !== runCommand || oauthLoginImpl !== defaultOAuthLogin,
 } = {}) {
   if (typeof runCommandImpl !== 'function') throw new TypeError('runCommandImpl must be a function');
   if (typeof oauthLoginImpl !== 'function') throw new TypeError('oauthLoginImpl must be a function');
   if (typeof write !== 'function') throw new TypeError('write must be a function');
   const expected = Number(expectedSafeRows);
   if (!Number.isInteger(expected) || expected < 1) throw new TypeError('expectedSafeRows must be a positive integer');
-  if (!skipOAuthEnvPreflight) validateOAuthPreflight();
 
   write('MIGRATION preflight START');
   const baselineRows = await query(runCommandImpl, BASELINE_SQL);
@@ -191,13 +178,10 @@ export async function runProductionSafeSnapshotMigration({
   ensureSuccess(await wrangler(runCommandImpl, ['deploy']), 'Worker deployment');
   write('MIGRATION deploy PASS');
 
-  let oauthReport;
   try {
-    oauthReport = await oauthLoginImpl({ write });
-    if (oauthReport?.oauth_authenticated !== true) {
-      throw new Error('OAuth live smoke did not authenticate');
-    }
-  } catch (error) {
+    const oauthReport = await oauthLoginImpl({ write });
+    if (oauthReport?.oauth_authenticated !== true) throw new Error('OAuth live smoke did not authenticate');
+  } catch {
     write('MIGRATION oauth FAIL; rolling back Worker');
     ensureSuccess(await wrangler(runCommandImpl, ['rollback', rollbackVersion]), 'Worker rollback');
     write('MIGRATION rollback PASS');
@@ -232,6 +216,4 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await main();
-}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
