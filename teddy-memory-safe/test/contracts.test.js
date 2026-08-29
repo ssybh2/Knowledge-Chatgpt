@@ -15,6 +15,27 @@ test('source message contract keeps only fields needed by the safe pipeline', ()
   });
 });
 
+test('source message accepts real archive is_retrievable field', () => {
+  assert.deepEqual(normalizeSourceMessage({
+    id: 'm-real', conversation_id: 'c-real', role: 'user', content: '真实导出里的技术项目内容',
+    is_retrievable: 1
+  }), {
+    id: 'm-real', conversation_id: 'c-real', role: 'user', content: '真实导出里的技术项目内容',
+    create_time: null, sequence_index: 0, retrievable: true
+  });
+
+  assert.equal(normalizeSourceMessage({
+    id: 'm-hidden', conversation_id: 'c-real', role: 'user', content: 'hidden', is_retrievable: 0
+  }).retrievable, false);
+});
+
+test('explicit retrievable field takes precedence over is_retrievable compatibility alias', () => {
+  assert.equal(normalizeSourceMessage({
+    id: 'm1', conversation_id: 'c1', role: 'user', content: 'visible',
+    retrievable: false, is_retrievable: 1
+  }).retrievable, false);
+});
+
 test('source message defaults optional fields and preserves explicit false', () => {
   assert.deepEqual(normalizeSourceMessage({
     id: 'm1', conversation_id: 'c1', role: 'assistant', content: 'visible', retrievable: false
