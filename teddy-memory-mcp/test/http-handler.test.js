@@ -22,6 +22,21 @@ function mcpRequest(body) {
   });
 }
 
+async function readMcpPayload(response) {
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    return response.json();
+  }
+
+  const text = await response.text();
+  const dataLine = text
+    .split(/\r?\n/)
+    .find((line) => line.startsWith('data:'));
+
+  assert.ok(dataLine, `Expected MCP JSON or SSE data frame, got: ${text}`);
+  return JSON.parse(dataLine.slice('data:'.length).trim());
+}
+
 test('Streamable HTTP tools/list exposes exactly the three Teddy Memory tools', async () => {
   const handler = createTeddyMemoryHttpHandler(fakeClient());
 
@@ -32,7 +47,7 @@ test('Streamable HTTP tools/list exposes exactly the three Teddy Memory tools', 
   }));
 
   assert.equal(response.status, 200);
-  const payload = await response.json();
+  const payload = await readMcpPayload(response);
   assert.equal(payload.jsonrpc, '2.0');
   assert.equal(payload.id, 1);
 
@@ -49,7 +64,7 @@ test('Streamable HTTP tool definitions remain read-only', async () => {
     method: 'tools/list',
   }));
 
-  const payload = await response.json();
+  const payload = await readMcpPayload(response);
   for (const tool of payload.result.tools) {
     assert.equal(tool.annotations?.readOnlyHint, true);
     assert.equal(tool.annotations?.destructiveHint, false);
