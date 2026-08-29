@@ -135,7 +135,7 @@ WWW-Authenticate: Bearer
 
 A valid token that lacks `memory:read` MUST be rejected without performing memory D1 reads. The response SHOULD use an OAuth insufficient-scope challenge rather than a generic application error.
 
-No authentication failure may fall back to `PLUGIN_DEV_ACCESS_TOKEN` or the private memory track once Plan 3 live verification has passed.
+No authentication failure may fall back to `PLUGIN_DEV_ACCESS_TOKEN` or the private memory track once the OAuth-only Worker is deployed.
 
 ## 9. Access-token validation
 
@@ -175,13 +175,15 @@ CREATE TABLE oauth_principals (
 );
 ```
 
-The Worker computes:
+The Worker first validates that JWT `iss` exactly equals the configured issuer, then computes:
 
 ```text
-subject_hash = hex(SHA-256(issuer + "\0" + sub))
+subject_hash = hex(SHA-256(configured_issuer + "\0" + sub))
 ```
 
-using Web Crypto, then resolves the owner with a prepared SQL query:
+using Web Crypto. The configured issuer string is the canonical issuer used by the mapping table; no alternate issuer spelling or normalization fallback is accepted.
+
+The Worker resolves the owner with a prepared SQL query:
 
 ```sql
 SELECT owner_id
@@ -229,19 +231,20 @@ Queries resembling credentials, API keys, OTP/MFA data, payment data, government
 
 OAuth authentication success does not grant permission to bypass Plugin-Safe content restrictions.
 
-## 13. Plan 2 staging-token retirement
+## 13. Plan 2 staging-token retirement and OAuth cutover
 
-During implementation and pre-live testing, the existing Plan 2 staging bearer MAY remain deployed so the currently working service is not locked out before OAuth is verified.
+The currently deployed Plan 2 Worker remains unchanged while Plan 3 code is developed and verified in Git/CI. Plan 3 implementation MUST NOT add a production request path that accepts both the staging bearer and OAuth as alternative credentials.
 
-The production request path MUST NOT support both authentication systems after Plan 3 completion.
+When OAuth code, Auth0 configuration, principal mapping, and pre-deployment tests are ready, cut over atomically:
 
-After successful Auth0 + ChatGPT live verification:
+1. record the known-good Plan 2 deployment/version for rollback;
+2. deploy the OAuth-only Worker to the existing production host;
+3. immediately run RFC 9728 metadata, anonymous challenge, Auth0 token, ChatGPT login, and memory smoke verification;
+4. if OAuth live verification fails, roll back to the known-good Plan 2 version and debug before another cutover attempt;
+5. if OAuth live verification succeeds, locally delete the unused Cloudflare secret `PLUGIN_DEV_ACCESS_TOKEN`;
+6. rerun OAuth-only live smoke and safe-memory aggregate-count verification.
 
-1. remove the staging-auth path from Worker request handling;
-2. redeploy the OAuth-only Worker;
-3. locally delete the Cloudflare secret `PLUGIN_DEV_ACCESS_TOKEN`;
-4. rerun anonymous/OAuth live smoke tests;
-5. verify D1 safe-memory row counts remain unchanged.
+No live failure may be handled by adding a staging-token fallback to the OAuth Worker.
 
 Deleting the Cloudflare secret is an operator-local action. The secret value is never requested by this repository or by ChatGPT.
 
@@ -342,7 +345,8 @@ Required coverage:
 
 ### Principal mapping
 
-- `iss + sub` hashing deterministic;
+- configured-issuer + `sub` hashing deterministic;
+- alternate issuer spelling does not alias an existing mapping;
 - raw subject not used as SQL owner ID;
 - known active mapping resolves intended owner;
 - unknown mapping denied;
@@ -394,8 +398,8 @@ Plan 3 is COMPLETE only when all of the following are true:
 [ ] exactly three MCP tools remain exposed
 [ ] benign safe-memory lookup succeeds
 [ ] no memory body is printed by live smoke
-[ ] staging bearer path removed from production Worker
-[ ] PLUGIN_DEV_ACCESS_TOKEN deleted locally after OAuth cutover
+[ ] production request path is OAuth-only with no staging fallback
+[ ] PLUGIN_DEV_ACCESS_TOKEN deleted locally after successful OAuth cutover
 [ ] SAFE_DB remains the only D1 binding
 [ ] safe_memories remains exactly 4227 total / 4227 teddy-primary / 4227 active after read verification
 [ ] CI test + smoke + Cloudflare dry-run are green
