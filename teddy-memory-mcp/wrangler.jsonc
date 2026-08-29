@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "teddy-memory-mcp",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-08-29",
+  "workers_dev": true,
+  "services": [
+    {
+      "binding": "TEDDY_MEMORY_API",
+      "service": "teddy-memory-api"
+    }
+  ],
+  "vars": {
+    "TEDDY_MEMORY_API_BASE_URL": "https://teddy-memory-api.3767174214.workers.dev",
+    "TEDDY_MEMORY_TIMEOUT_MS": "15000",
+    "MCP_ALLOWED_HOSTS": "teddy-memory-mcp.3767174214.workers.dev",
+    "MCP_ALLOWED_ORIGINS": ""
+  }
+}
