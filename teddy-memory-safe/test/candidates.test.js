@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCandidate } from '../src/candidates.js';
+import * as candidates from '../src/candidates.js';
+
+const { buildCandidate } = candidates;
 
 const userMessage = {
   id: 'conv::node-1',
@@ -11,6 +13,20 @@ const userMessage = {
   sequence_index: 0,
   retrievable: true,
 };
+
+test('candidate source identity helper preserves the exact deployed formula', () => {
+  assert.equal(typeof candidates.candidateIdForSource, 'function');
+  assert.equal(
+    candidates.candidateIdForSource('owner-1', 'conv::node-1'),
+    'cand_79c264d12523e775ddbc56bc',
+  );
+  const candidate = buildCandidate({
+    ownerId: 'owner-1',
+    message: userMessage,
+    conversationTitle: 'EtherCAT Integration',
+  });
+  assert.equal(candidate.candidate_id, 'cand_79c264d12523e775ddbc56bc');
+});
 
 test('only retrievable user messages become candidates', () => {
   assert.equal(buildCandidate({ ownerId: 'owner-1', message: userMessage, conversationTitle: 'EtherCAT' }).decision, 'pending');
