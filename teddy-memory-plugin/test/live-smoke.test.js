@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runLiveSmoke } from '../scripts/live-smoke.mjs';
+import * as liveSmoke from '../scripts/live-smoke.mjs';
 
+const { runLiveSmoke } = liveSmoke;
 const RESOURCE = 'https://plugin.example.com/mcp';
 const ISSUER = 'https://tenant.example.auth0.com/';
 const METADATA_PATH = '/.well-known/oauth-protected-resource';
@@ -100,6 +101,10 @@ function fakeFetch({ searchMemories = defaultSearchMemories } = {}) {
 
   return { calls, fetchImpl };
 }
+
+test('live-smoke exports the reusable authenticated MCP POST helper', () => {
+  assert.equal(typeof liveSmoke.postMcp, 'function');
+});
 
 test('OAuth live smoke verifies metadata and MCP while printing aggregates only', async () => {
   const fake = fakeFetch();
