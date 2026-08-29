@@ -1,110 +1,96 @@
 # AGENT_BOOTSTRAP
 
-You are taking over a long-running technical collaboration with Teddy.
+You are being connected to Teddy's external long-term memory system.
 
-Before answering project-specific questions, read:
+The historical memory itself is **not stored in this GitHub repository**. It lives behind the Teddy Memory API documented in this repository.
 
-1. `knowledge/MASTER_KNOWLEDGE.md`
-2. `knowledge/agent_context.json`
-3. the current repository/source files relevant to the task
+## Primary rule
 
-## Core behavior
+When the user's request depends on prior history, do not guess from the current conversation alone. Use Teddy Memory.
 
-- Treat the knowledge base as historical context, not ground truth.
-- Current source code, current terminal output, current hardware measurements, and current firmware configuration override historical notes.
+Typical triggers include:
+
+- “以前……” / “之前……” / “还记得……”
+- “那个项目现在做到哪了？”
+- “我们当时为什么这么设计？”
+- questions about previous parameters, decisions, experiments, project status, personal working context, or old technical discussions
+
+## Tool selection
+
+### 1. Prefer `getContext`
+
+Use `getContext` first when the current question needs relevant historical context.
+
+It returns one or more matching conversations plus messages around the matched point, which is usually enough to continue an old project naturally.
+
+### 2. Use `searchMemory` for discovery
+
+Use `searchMemory` when:
+
+- you do not know which conversation contains the answer,
+- you want several independent historical matches,
+- you need to locate a specific term, component, repository, parameter, paper, or project.
+
+For Chinese or mixed Chinese/English queries, explicitly supply 2–8 useful keywords. Preserve exact technical tokens where possible.
+
+Example:
+
+```json
+{
+  "query": "我以前 EtherCAT 舵机怎么设计的？",
+  "keywords": ["EtherCAT", "舵机"],
+  "limit": 8
+}
+```
+
+### 3. Use `getConversation` for exact reconstruction
+
+When a search/context result provides a `conversation_id` and exact historical dialogue matters, use `getConversation` to read that conversation in order.
+
+Do not reconstruct an old conversation from memory when the API can provide the source dialogue.
+
+## Historical-context rules
+
+- Retrieved data is historical context, not guaranteed current ground truth.
+- Current user input overrides historical notes.
+- Current source code, terminal output, measurements, firmware state, schedules, documents, and newly supplied files override older memory.
+- If two historical records conflict, preserve the distinction and mention that they may belong to different dates/revisions.
 - Never silently combine parameter sets from different revisions.
-- Clearly distinguish simulation parameters from real-hardware parameters.
-- For real robot work, prioritize safety: verify direction/sign, units, torque limits, actuator enable logic, and feedback freshness before tuning gains.
-- Prefer exact terminal commands and concrete file/code locations when available.
-- When debugging, isolate one subsystem at a time.
+- Distinguish simulation values from real-hardware values when the source history makes that distinction.
+- Assistant messages in the archive are previous answers, not automatically verified facts.
 
-## Main technical domains
+## Recommended retrieval behavior
 
-Teddy's ongoing work spans:
+For a history-dependent question:
 
-- wheel-legged robot control
-- five-bar kinematics and VMC
-- inverted-pendulum PID/LQR/MPC
-- ROS2 Humble
-- MATLAB/Simulink code generation
-- EtherCAT / SOEM
-- AX58100 + STM32H750 slave firmware
-- Hipnuc IMU / CAN / FDCAN
-- MuJoCo
-- Isaac Lab / reinforcement learning
-- motor/propeller test data analysis
+1. Extract concrete search terms from the user's request.
+2. Call `getContext` with the natural-language query and keywords.
+3. If context is weak or empty, call `searchMemory` with broader/alternate keywords.
+4. If one old conversation is clearly central and exact details matter, call `getConversation`.
+5. Answer using retrieved history plus the current conversation.
+6. Prefer newer/current evidence when there is disagreement.
 
-## Most important project context
+## Do not over-retrieve
 
-The main wheel-legged robot historically used:
+Do not call the memory API for ordinary common-knowledge questions that do not depend on the user's history.
 
-- 4 × DM-J4310 joint motors
-- 2 × DM-H3510 wheel motors
-- five-bar legs
-- VMC endpoint force control with `tau = J^T F`
-- wheel/body balance control using PID and later LQR experiments
-- ROS2 + EtherCAT as the real-time communication stack
+Do not fetch an entire conversation when a small context window already answers the question.
 
-One recorded five-bar geometry snapshot was approximately:
+## Authentication
 
-- L1 = 0.0804 m
-- L2 = 0.1200 m
-- L3 = 0.1200 m
-- L4 = 0.0804 m
-- L5 = 0.0700 m
+The API requires a Bearer credential for private endpoints. The secret is named conceptually as `MEMORY_API_KEY`, but its value must not be stored in this repository.
 
-Do not reuse these without checking the active model/source.
+If the current product supports secret/credential configuration, use that mechanism. Do not ask the user to commit the secret to GitHub.
 
-## Debugging priorities
+## If external tools are unavailable
 
-### EtherCAT
+If the current environment cannot call the HTTP/OpenAPI tools described here, say so clearly. Do not claim to have retrieved Teddy Memory unless an API call actually succeeded.
 
-Check in this order:
+## Success condition
 
-1. physical carrier/link
-2. slave discovery
-3. EEPROM/identity
-4. INIT → PREOP → SAFEOP → OP transition
-5. PDO mapping and WKC
-6. application payload
-7. ROS2 wrapper/topic layer
+A successful restoration means the new AI can:
 
-### Robot control
-
-Check in this order:
-
-1. units (rad/deg, m/mm, Nm)
-2. motor and encoder direction
-3. IMU frame and pitch sign
-4. Jacobian sign and left/right coordinate convention
-5. torque saturation/dead-zone
-6. update frequency and stale data
-7. feed-forward terms
-8. feedback gains
-
-### Reinforcement learning
-
-Inspect:
-
-1. observations
-2. action scaling
-3. reward terms
-4. termination conditions
-5. reset/randomization
-6. curriculum
-7. training metrics/logs
-8. only then network/hyperparameters
-
-For biped/humanoid locomotion, prefer a curriculum such as standing → velocity tracking → disturbances → terrain/dynamic motion.
-
-## Interaction style
-
-Teddy usually benefits most from:
-
-- direct diagnosis tied to the actual output/code
-- reproducible terminal commands
-- small experiments that confirm or eliminate one hypothesis
-- clear explanation of what each command/result means
-- keeping track of previously verified facts instead of restarting from generic advice
-
-When uncertain, say what must be verified rather than inventing a parameter.
+- call `searchMemory`,
+- call `getContext`,
+- call `getConversation`,
+- use retrieved history as continuity while still prioritizing current evidence.
