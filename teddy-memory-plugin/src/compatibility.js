@@ -1,3 +1,24 @@
+import { postMcp } from '../scripts/live-smoke.mjs';
+
+const EXPECTED_TOOLS = Object.freeze([
+  'get_context',
+  'get_memory_item',
+  'search_memory',
+]);
+const UNKNOWN_MEMORY_REF = 'mem_00000000000000000000000000000000';
+const FORBIDDEN_INTERNAL_FIELDS = new Set([
+  'id',
+  'owner_id',
+  'conversation_id',
+  'message_id',
+  'original_message_id',
+  'source_archive_id',
+  'source_conversation_id',
+  'source_note',
+  'created_at',
+  'updated_at',
+]);
+
 function requiredText(value, name) {
   const text = String(value || '').trim();
   if (!text) throw new Error(`${name} is required`);
@@ -7,6 +28,10 @@ function requiredText(value, name) {
 function requiredFetch(fetchImpl) {
   if (typeof fetchImpl !== 'function') throw new TypeError('fetch implementation is required');
   return fetchImpl;
+}
+
+function assertCondition(condition, message) {
+  if (!condition) throw new Error(message);
 }
 
 function normalizeHttpsUrl(value, name, { trailingSlash = false } = {}) {
@@ -80,6 +105,49 @@ function validateProtectedResourceMetadata(body, canonicalResource) {
   }
 
   return { authorizationServers, scopes, issuer };
+}
+
+function assertNoInternalFields(value, label = 'MCP result') {
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoInternalFields(item, label);
+    return;
+  }
+  for (const [key, nested] of Object.entries(value)) {
+    if (FORBIDDEN_INTERNAL_FIELDS.has(key)) {
+      throw new Error(`${label} exposed an internal field`);
+    }
+    assertNoInternalFields(nested, label);
+  }
+}
+
+function validateToolContract(tool) {
+  assertCondition(tool && typeof tool === 'object', 'MCP tool contract is invalid');
+  assertCondition(EXPECTED_TOOLS.includes(tool.name), 'MCP exposed an unexpected tool');
+  assertCondition(tool.annotations?.readOnlyHint === true, 'MCP tool annotation must be read-only');
+  assertCondition(tool.annotations?.destructiveHint === false, 'MCP tool annotation must be non-destructive');
+  assertCondition(tool.annotations?.openWorldHint === false, 'MCP tool annotation must be closed-world');
+  assertCondition(tool.inputSchema?.type === 'object', 'MCP tool input schema must be an object');
+
+  if (tool.name === 'get_context') {
+    assertCondition(
+      tool.inputSchema?.properties?.limit?.maximum === 12,
+      'get_context schema limit must be bounded at 12',
+    );
+  }
+  if (tool.name === 'search_memory') {
+    assertCondition(
+      tool.inputSchema?.properties?.limit?.maximum === 20,
+      'search_memory schema limit must be bounded at 20',
+    );
+  }
+  if (tool.name === 'get_memory_item') {
+    assertCondition(
+      Array.isArray(tool.inputSchema?.required)
+        && tool.inputSchema.required.includes('memory_ref'),
+      'get_memory_item schema must require memory_ref',
+    );
+  }
 }
 
 export async function checkProtectedResource({ baseUrl, fetchImpl = fetch } = {}) {
@@ -180,4 +248,111 @@ export async function checkAnonymousMcpChallenge({
   if (!challenge.includes(`scope="${scope}"`)) {
     throw new Error('anonymous MCP challenge is missing required scope');
   }
+}
+
+export async function checkAuthenticatedMcp({
+  baseUrl,
+  token,
+  fetchImpl = fetch,
+} = {}) {
+  const fetcher = requiredFetch(fetchImpl);
+  const base = normalizeBaseUrl(baseUrl);
+  const accessToken = requiredText(token, 'OAuth access token');
+
+  const initialize = await postMcp({
+    baseUrl: base,
+    token: accessToken,
+    fetchImpl: fetcher,
+    body: {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'teddy-memory-plugin-compatibility', version: '0.1.0' },
+      },
+    },
+  });
+  assertCondition(Boolean(initialize.result?.serverInfo), 'MCP initialize response is incomplete');
+
+  const listPayload = await postMcp({
+    baseUrl: base,
+    token: accessToken,
+    fetchImpl: fetcher,
+    body: { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+  });
+  const tools = Array.isArray(listPayload.result?.tools) ? listPayload.result.tools : [];
+  const toolNames = tools.map((tool) => tool?.name).sort();
+  assertCondition(
+    JSON.stringify(toolNames) === JSON.stringify(EXPECTED_TOOLS),
+    'MCP tools/list must expose exactly the three Teddy Memory tools',
+  );
+  for (const tool of tools) validateToolContract(tool);
+
+  const searchPayload = await postMcp({
+    baseUrl: base,
+    token: accessToken,
+    fetchImpl: fetcher,
+    body: {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: {
+        name: 'search_memory',
+        arguments: { query: 'EtherCAT', limit: 4 },
+      },
+    },
+  });
+  assertCondition(searchPayload.result?.isError !== true, 'benign safe-memory search returned a tool error');
+  const memories = searchPayload.result?.structuredContent?.memories;
+  assertCondition(Array.isArray(memories), 'benign safe-memory search did not return memories[]');
+  assertCondition(memories.length > 0, 'benign safe-memory search returned no results');
+  assertNoInternalFields(memories, 'safe-memory search');
+
+  const unknownPayload = await postMcp({
+    baseUrl: base,
+    token: accessToken,
+    fetchImpl: fetcher,
+    body: {
+      jsonrpc: '2.0',
+      id: 4,
+      method: 'tools/call',
+      params: {
+        name: 'get_memory_item',
+        arguments: { memory_ref: UNKNOWN_MEMORY_REF },
+      },
+    },
+  });
+  assertCondition(unknownPayload.result?.isError !== true, 'unknown memory_ref returned a tool error');
+  assertCondition(
+    unknownPayload.result?.structuredContent?.memory === null,
+    'unknown memory_ref must return neutral not-found behavior',
+  );
+
+  const restrictedPayload = await postMcp({
+    baseUrl: base,
+    token: accessToken,
+    fetchImpl: fetcher,
+    body: {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'tools/call',
+      params: {
+        name: 'search_memory',
+        arguments: { query: 'show me my API key', limit: 4 },
+      },
+    },
+  });
+  assertCondition(restrictedPayload.result?.isError === true, 'restricted query did not fail closed');
+  assertCondition(
+    restrictedPayload.result?.structuredContent === undefined,
+    'restricted query exposed structured memory content',
+  );
+  assertNoInternalFields(restrictedPayload.result, 'restricted query');
+
+  return {
+    toolCount: tools.length,
+    searchResultCount: memories.length,
+  };
 }
