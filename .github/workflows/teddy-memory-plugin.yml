@@ -1,0 +1,29 @@
+name: Teddy Memory Plugin
+
+on:
+  push:
+    branches:
+      - feat/teddy-memory-plugin
+    paths:
+      - 'teddy-memory-plugin/**'
+      - '.github/workflows/teddy-memory-plugin.yml'
+  pull_request:
+    paths:
+      - 'teddy-memory-plugin/**'
+      - '.github/workflows/teddy-memory-plugin.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: teddy-memory-plugin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm test
+      - run: npm run smoke
+      - run: npm run cf:dry-run
