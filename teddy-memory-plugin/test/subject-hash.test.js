@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import { subjectHashFromEnv } from '../scripts/subject-hash.mjs';
 
@@ -9,6 +10,7 @@ const issuer = 'https://tenant.example.auth0.com/';
 const subject = 'auth0|test-user';
 const expectedHash = 'ddf722eebbb0f7d1daae8ffe6451d79a7a4855717fde52b4c0a9804d1b12d27c';
 const scriptUrl = new URL('../scripts/subject-hash.mjs', import.meta.url);
+const scriptPath = fileURLToPath(scriptUrl);
 const schemaUrl = new URL('../sql/001_oauth_principals.sql', import.meta.url);
 
 test('subjectHashFromEnv returns only the deterministic hash', async () => {
@@ -31,7 +33,7 @@ test('importing subject-hash helper has no CLI side effects', () => {
 });
 
 test('subject-hash CLI prints the hash without echoing issuer or subject', () => {
-  const result = spawnSync(process.execPath, [scriptUrl.pathname], {
+  const result = spawnSync(process.execPath, [scriptPath], {
     encoding: 'utf8',
     env: {
       ...process.env,
