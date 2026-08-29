@@ -1,0 +1,3 @@
+{"id":"demo-conv-ethercat::m1","conversation_id":"demo-conv-ethercat","role":"user","content":"I decided to keep the EtherCAT integration read-only during the first verification stage and record the servo mapping separately.","create_time":1780000000,"sequence_index":0,"retrievable":true}
+{"id":"demo-conv-ethercat::m2","conversation_id":"demo-conv-ethercat","role":"assistant","content":"Acknowledged the synthetic project decision.","create_time":1780000010,"sequence_index":1,"retrievable":true}
+{"id":"demo-conv-learning::m1","conversation_id":"demo-conv-learning","role":"user","content":"My synthetic learning plan is to finish control theory review before starting the next robotics module.","create_time":1780000100,"sequence_index":0,"retrievable":true}
