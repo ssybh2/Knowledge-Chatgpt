@@ -11,6 +11,13 @@ function validEnv() {
     MCP_ALLOWED_ORIGINS: '',
     TEDDY_MEMORY_API_BASE_URL: 'https://backend.example.com',
     TEDDY_MEMORY_TIMEOUT_MS: '9000',
+    TEDDY_MEMORY_API: {
+      async fetch() {
+        return new Response(JSON.stringify({ ok: true }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    },
   };
 }
 
@@ -40,9 +47,21 @@ test('worker health check stays available without constructing the backend clien
   assert.equal(clientCalls, 0);
 });
 
-test('worker keeps client bearer auth separate from the backend MEMORY_API_KEY', async () => {
+test('worker keeps client bearer auth separate from backend auth and routes backend calls through the service binding', async () => {
   let seenConfig;
   let seenRequest;
+  let serviceFetchCalls = 0;
+
+  const env = validEnv();
+  env.TEDDY_MEMORY_API = {
+    async fetch(request) {
+      serviceFetchCalls += 1;
+      assert.equal(new URL(request.url).pathname, '/v1/context');
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  };
 
   const fetchWorker = createWorkerFetch({
     createClient: (config) => {
@@ -60,16 +79,18 @@ test('worker keeps client bearer auth separate from the backend MEMORY_API_KEY',
     },
   });
 
-  const response = await fetchWorker(remoteRequest(), validEnv());
+  const response = await fetchWorker(remoteRequest(), env);
 
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'mcp-ok');
   assert.equal(seenRequest.headers.get('authorization'), 'Bearer client-secret');
-  assert.deepEqual(seenConfig, {
-    apiKey: 'backend-secret',
-    baseUrl: 'https://backend.example.com',
-    timeoutMs: 9000,
-  });
+  assert.equal(seenConfig.apiKey, 'backend-secret');
+  assert.equal(seenConfig.baseUrl, 'https://backend.example.com');
+  assert.equal(seenConfig.timeoutMs, 9000);
+  assert.equal(typeof seenConfig.fetchImpl, 'function');
+
+  await seenConfig.fetchImpl(new Request('https://backend.example.com/v1/context'));
+  assert.equal(serviceFetchCalls, 1);
 });
 
 test('invalid remote bearer auth is rejected before backend construction', async () => {
