@@ -13,6 +13,7 @@
   "vars": {
     "PLUGIN_ALLOWED_HOSTS": "teddy-memory-plugin.3767174214.workers.dev",
     "PLUGIN_ALLOWED_ORIGINS": "",
+    "PLUGIN_OAUTH_ISSUER": "https://dev-32xguyuwp0wrwddr.us.auth0.com/",
     "PLUGIN_OAUTH_RESOURCE": "https://teddy-memory-plugin.3767174214.workers.dev/mcp",
     "PLUGIN_OAUTH_REQUIRED_SCOPE": "memory:read"
   }
