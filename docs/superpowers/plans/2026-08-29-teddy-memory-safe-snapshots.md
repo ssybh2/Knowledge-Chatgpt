@@ -34,7 +34,7 @@
 - Create `teddy-memory-safe/src/snapshot-export.js` — deterministic Safe DTO digest, load SQL, activation SQL, rollback SQL, cleanup SQL.
 - Create `teddy-memory-safe/test/snapshot-export.test.js` — SQL generation/redaction/idempotency tests.
 - Modify `teddy-memory-safe/src/cli.js` — add `export-snapshot-d1` command.
-- Modify `teddy-memory-safe/package.json` smoke import list if required.
+- Modify `teddy-memory-safe/package.json` — extend `smoke` to import `src/snapshot-export.js`.
 - Modify `teddy-memory-safe/README.md` — recurring snapshot publication commands after implementation is verified.
 
 ### Task 1: Add the idempotent snapshot schema and static security tests
@@ -48,8 +48,6 @@
 - Later Worker queries consume `safe_active_snapshot.owner_id -> snapshot_id`.
 
 - [ ] **Step 1: Write the failing static schema tests**
-
-Create tests that read the SQL and require the intended keys/constraints while rejecting private/runtime credential names:
 
 ```js
 import { strict as assert } from 'node:assert';
@@ -79,8 +77,6 @@ node --test test/snapshot-schema.test.js
 Expected: FAIL because `002_safe_snapshots.sql` does not exist.
 
 - [ ] **Step 3: Implement `002_safe_snapshots.sql`**
-
-Use this schema shape:
 
 ```sql
 CREATE TABLE IF NOT EXISTS safe_snapshots (
@@ -120,8 +116,6 @@ CREATE TABLE IF NOT EXISTS safe_active_snapshot (
 );
 ```
 
-Do not add source IDs or `oauth_principals` references.
-
 - [ ] **Step 4: Run focused and plugin tests**
 
 ```powershell
@@ -151,13 +145,11 @@ git commit -m "feat: add safe snapshot schema"
 
 - [ ] **Step 1: Write failing seed tests**
 
-Require server-side `INSERT ... SELECT` from `safe_memories`, no literal memory content, no principal changes, and an `NOT EXISTS` guard:
-
 ```js
 test('legacy seed copies safe rows server-side without touching oauth principals', async () => {
   const sql = await readFile(new URL('../sql/003_seed_legacy_safe_snapshot.sql', import.meta.url), 'utf8');
   assert.match(sql, /snap_legacy_seed_v1/);
-  assert.match(sql, /INSERT .*safe_snapshot_memories[\s\S]*SELECT[\s\S]*FROM safe_memories/i);
+  assert.match(sql, /INSERT OR IGNORE INTO safe_snapshot_memories[\s\S]*SELECT[\s\S]*FROM safe_memories/i);
   assert.match(sql, /NOT EXISTS[\s\S]*safe_active_snapshot/i);
   assert.doesNotMatch(sql, /oauth_principals|DELETE FROM safe_memories|DROP TABLE/i);
 });
@@ -171,16 +163,53 @@ node --test test/snapshot-schema.test.js
 
 Expected: FAIL because seed SQL does not exist.
 
-- [ ] **Step 3: Implement the seed in one transaction**
+- [ ] **Step 3: Implement the complete seed transaction**
 
-The SQL must:
+```sql
+BEGIN TRANSACTION;
 
-1. insert `safe_snapshots('snap_legacy_seed_v1', 'teddy-primary', ..., 'legacy:seed-v1', COUNT(*), 'active')` only if no active pointer exists;
-2. copy `memory_ref, category, title, summary, keywords_json, event_time, revision, is_active` from current `safe_memories WHERE owner_id='teddy-primary' AND is_active=1` into the seed snapshot only if no active pointer exists;
-3. insert `safe_active_snapshot('teddy-primary','snap_legacy_seed_v1',...)` only if absent;
-4. never delete/update `safe_memories` or `oauth_principals`.
+INSERT OR IGNORE INTO safe_snapshots (
+  snapshot_id, owner_id, created_at, source_digest, record_count, status
+)
+SELECT
+  'snap_legacy_seed_v1',
+  'teddy-primary',
+  CAST(strftime('%s','now') AS INTEGER),
+  'legacy:seed-v1',
+  COUNT(*),
+  'active'
+FROM safe_memories
+WHERE owner_id = 'teddy-primary' AND is_active = 1
+  AND NOT EXISTS (
+    SELECT 1 FROM safe_active_snapshot WHERE owner_id = 'teddy-primary'
+  );
 
-Use `BEGIN TRANSACTION; ... COMMIT;` and `INSERT OR IGNORE`/guarded `SELECT` so rerunning is harmless.
+INSERT OR IGNORE INTO safe_snapshot_memories (
+  snapshot_id, memory_ref, category, title, summary, keywords_json,
+  event_time, revision, is_active
+)
+SELECT
+  'snap_legacy_seed_v1', memory_ref, category, title, summary, keywords_json,
+  event_time, revision, is_active
+FROM safe_memories
+WHERE owner_id = 'teddy-primary' AND is_active = 1
+  AND NOT EXISTS (
+    SELECT 1 FROM safe_active_snapshot WHERE owner_id = 'teddy-primary'
+  );
+
+INSERT OR IGNORE INTO safe_active_snapshot (owner_id, snapshot_id, updated_at)
+SELECT
+  'teddy-primary',
+  'snap_legacy_seed_v1',
+  CAST(strftime('%s','now') AS INTEGER)
+WHERE NOT EXISTS (
+  SELECT 1 FROM safe_active_snapshot WHERE owner_id = 'teddy-primary'
+);
+
+COMMIT;
+```
+
+The test must also assert this SQL contains no `UPDATE safe_memories`, `DELETE`, `DROP`, or `oauth_principals` reference.
 
 - [ ] **Step 4: Run tests**
 
@@ -210,7 +239,7 @@ git commit -m "feat: seed legacy safe snapshot"
 
 - [ ] **Step 1: Change repository tests first to require active-snapshot owner binding**
 
-The fake D1 assertion should require SQL containing:
+Require SQL equivalent to:
 
 ```sql
 FROM safe_active_snapshot active
@@ -236,7 +265,7 @@ Expected: FAIL because current SQL reads `safe_memories` directly.
 
 - [ ] **Step 3: Implement the smallest SQL change**
 
-Keep scoring, limits, DTO conversion, and prepared binds unchanged. Only replace the owner row CTE/source with active snapshot joins and alias fields back to the existing names.
+Keep scoring, limits, DTO conversion, and prepared binds unchanged. Replace the current `safe_memories` source with active-snapshot joins and alias the memory columns back to the existing field names.
 
 - [ ] **Step 4: Run all plugin gates**
 
@@ -265,13 +294,15 @@ git commit -m "feat: read active safe snapshot"
 
 **Interfaces:**
 - Produces: `canonicalSafeDigest(records) -> string` formatted `sha256:<64 lowercase hex>`.
-- Produces: `writeSnapshotBatches(records, { ownerId, snapshotId, outDir, batchSize, nowSeconds }) -> Promise<{ digest, recordCount, files }>`.
-- Produces SQL files: `000-create-snapshot.sql`, `NNN-snapshot-memories.sql`, `900-mark-ready.sql`, `910-activate.sql`, `920-rollback.sql`.
-- Adds CLI: `node src/cli.js export-snapshot-d1 --approved <path> --owner <owner> --snapshot-id <id> --out-dir <dir> [--batch-size <n>]`.
+- Produces: `renderActivateSnapshot({ ownerId, snapshotId, nowSeconds }) -> string`.
+- Produces: `renderRollbackSnapshot({ ownerId, failedSnapshotId, previousSnapshotId, nowSeconds }) -> string`.
+- Produces: `writeSnapshotBatches(records, { ownerId, snapshotId, outDir, batchSize, nowSeconds, previousSnapshotId }) -> Promise<{ digest, recordCount, files }>`.
+- Produces SQL files: `000-create-snapshot.sql`, numbered memory batches, `900-mark-ready.sql`, `910-activate.sql`; add `920-rollback.sql` when `previousSnapshotId` is supplied.
+- Adds CLI: `node src/cli.js export-snapshot-d1 --approved <path> --owner <owner> --snapshot-id <id> --out-dir <dir> [--batch-size <n>] [--previous-snapshot-id <id>]`.
 
-- [ ] **Step 1: Write RED tests for canonical digest and public-only SQL**
+- [ ] **Step 1: Write RED tests for canonical digest and public-only memory batches**
 
-Canonical digest must be independent of input order by sorting records by `memory_ref` and hashing a stable JSON representation of exactly:
+Canonical digest must sort records by `memory_ref` and hash stable JSON of exactly:
 
 ```js
 {
@@ -286,8 +317,6 @@ Canonical digest must be independent of input order by sorting records by `memor
 }
 ```
 
-Test:
-
 ```js
 test('canonicalSafeDigest is stable across input order', () => {
   assert.equal(canonicalSafeDigest([a, b]), canonicalSafeDigest([b, a]));
@@ -295,7 +324,7 @@ test('canonicalSafeDigest is stable across input order', () => {
 });
 ```
 
-Also assert generated SQL never contains `owner_id` inside memory payload rows, private source ID markers, raw ZIP digest terminology, or `oauth_principals`.
+Inspect the generated **memory batch files** specifically and assert they contain no `owner_id`, private source ID markers, `oauth_principals`, or ZIP digest strings.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -306,49 +335,63 @@ node --test test/snapshot-export.test.js
 
 Expected: FAIL because module does not exist.
 
-- [ ] **Step 3: Implement snapshot load SQL generation**
+- [ ] **Step 3: Implement snapshot load and pointer SQL generation**
 
 `000-create-snapshot.sql` inserts one `loading` row with the Safe DTO digest and expected record count.
 
 Each memory batch inserts only public fields into `safe_snapshot_memories` using `(snapshot_id, memory_ref)` conflict safety.
 
-`900-mark-ready.sql` must only update `status='ready'` when the remote loaded row count matches `safe_snapshots.record_count`; use a guarded `UPDATE ... WHERE (...) = record_count` so a mismatch leaves the snapshot in `loading`.
-
-`910-activate.sql` must use one transaction and only switch if the target is `ready`:
+`900-mark-ready.sql` uses a guarded update:
 
 ```sql
-BEGIN TRANSACTION;
+UPDATE safe_snapshots
+SET status = 'ready'
+WHERE snapshot_id = '<escaped snapshot id>'
+  AND owner_id = '<escaped owner id>'
+  AND status = 'loading'
+  AND (
+    SELECT COUNT(*) FROM safe_snapshot_memories
+    WHERE snapshot_id = '<escaped snapshot id>'
+  ) = record_count;
+```
+
+The implementation must build all literals with the existing `sqlLiteral()` helper rather than string-concatenating raw identifiers.
+
+Implement activation with variables already escaped by `sqlLiteral`:
+
+```js
+export function renderActivateSnapshot({ ownerId, snapshotId, nowSeconds }) {
+  const owner = sqlLiteral(ownerId);
+  const target = sqlLiteral(snapshotId);
+  const now = sqlLiteral(nowSeconds);
+  return `BEGIN TRANSACTION;
 UPDATE safe_snapshots
 SET status = 'retired'
 WHERE snapshot_id = (
-  SELECT active.snapshot_id
-  FROM safe_active_snapshot active
-  WHERE active.owner_id = '<owner>'
+  SELECT active.snapshot_id FROM safe_active_snapshot active
+  WHERE active.owner_id = ${owner}
 )
 AND EXISTS (
   SELECT 1 FROM safe_snapshots
-  WHERE snapshot_id = '<new>' AND owner_id = '<owner>' AND status = 'ready'
+  WHERE snapshot_id = ${target} AND owner_id = ${owner} AND status = 'ready'
 );
-
 INSERT INTO safe_active_snapshot(owner_id, snapshot_id, updated_at)
-SELECT owner_id, snapshot_id, <now>
+SELECT owner_id, snapshot_id, ${now}
 FROM safe_snapshots
-WHERE snapshot_id = '<new>' AND owner_id = '<owner>' AND status = 'ready'
+WHERE snapshot_id = ${target} AND owner_id = ${owner} AND status = 'ready'
 ON CONFLICT(owner_id) DO UPDATE SET
   snapshot_id = excluded.snapshot_id,
   updated_at = excluded.updated_at;
-
 UPDATE safe_snapshots
 SET status = 'active'
-WHERE snapshot_id = '<new>' AND owner_id = '<owner>' AND status = 'ready';
-COMMIT;
+WHERE snapshot_id = ${target} AND owner_id = ${owner} AND status = 'ready';
+COMMIT;`;
+}
 ```
 
-`920-rollback.sql` is generated only when a caller supplies the previous snapshot ID and atomically restores that pointer/status pair.
+`renderRollbackSnapshot` must require the caller's exact `previousSnapshotId`, set the failed snapshot from `active` to `retired`, restore the previous snapshot from `retired` to `active`, and update `safe_active_snapshot` in one transaction. It must refuse identical failed/previous IDs.
 
-- [ ] **Step 4: Add CLI command and run full Safe tests**
-
-Update `main()` command routing and error message to include `export-snapshot-d1`. Run:
+- [ ] **Step 4: Add CLI command, import `snapshot-export.js` in `smoke`, and run Safe tests**
 
 ```powershell
 npm test
@@ -372,11 +415,9 @@ git commit -m "feat: export atomic safe snapshots"
 
 **Interfaces:**
 - Produces: `renderSnapshotCleanup({ ownerId, keepSuccessful = 3 }) -> string`.
-- Cleanup keeps active + two newest retired successful snapshots by default.
+- With the default, keep the active snapshot plus the two newest retired snapshots.
 
 - [ ] **Step 1: Write failing cleanup tests**
-
-Assert the SQL never deletes the active pointer/snapshot and targets only retired snapshots outside the newest two retired rows:
 
 ```js
 test('cleanup retains active plus two newest retired snapshots', () => {
@@ -386,6 +427,8 @@ test('cleanup retains active plus two newest retired snapshots', () => {
   assert.doesNotMatch(sql, /DELETE FROM safe_active_snapshot/i);
 });
 ```
+
+Also assert `keepSuccessful < 2` throws because the active snapshot plus at least one rollback snapshot must remain.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -397,7 +440,7 @@ Expected: FAIL because cleanup renderer is missing.
 
 - [ ] **Step 3: Implement cleanup SQL renderer**
 
-Generate separate SQL that deletes `safe_snapshot_memories` and `safe_snapshots` only for retired snapshot IDs older than the two newest retired snapshots for the owner. Do not call this renderer from activation code.
+Generate separate SQL that deletes `safe_snapshot_memories` and `safe_snapshots` only for retired snapshot IDs older than `keepSuccessful - 1` retired rows for the owner. Do not call this renderer from activation code.
 
 - [ ] **Step 4: Run Safe tests**
 
@@ -418,12 +461,12 @@ git commit -m "feat: add safe snapshot retention cleanup"
 ### Task 6: Perform the production compatibility migration before deploying snapshot-reading Worker code
 
 **Files:**
-- No code changes unless verification exposes a bug.
-- Update `teddy-memory-safe/README.md` after successful production migration.
+- Modify: `teddy-memory-safe/README.md`
 
 **Interfaces:**
 - Remote DB: `teddy-memory-plugin-safe`.
 - Expected existing content before migration: 4,227 total / 4,227 `teddy-primary` / 4,227 active.
+- Expected principal mapping count: 1 active `teddy-primary` row.
 - Expected active snapshot after seed: `snap_legacy_seed_v1` with 4,227 rows.
 
 - [ ] **Step 1: Re-run local automated gates**
@@ -440,14 +483,15 @@ npm run smoke
 
 Expected: PASS.
 
-- [ ] **Step 2: Apply schema only**
+- [ ] **Step 2: Apply schema and verify principal aggregate**
 
 ```powershell
 cd D:\Knowledge-Chatgpt\teddy-memory-plugin
 npx wrangler d1 execute teddy-memory-plugin-safe --remote --file="sql/002_safe_snapshots.sql"
+npx wrangler d1 execute teddy-memory-plugin-safe --remote --command="SELECT COUNT(*) AS active_principals FROM oauth_principals WHERE owner_id='teddy-primary' AND is_active=1;"
 ```
 
-Then verify `oauth_principals` still has the active mapping using an aggregate count only.
+Expected: `active_principals = 1`.
 
 - [ ] **Step 3: Apply legacy seed and verify counts**
 
@@ -459,7 +503,7 @@ npx wrangler d1 execute teddy-memory-plugin-safe --remote --command="SELECT owne
 
 Expected: seed row `record_count=4227`, `loaded=4227`, `status=active`, active pointer `snap_legacy_seed_v1`.
 
-- [ ] **Step 4: Record the currently deployed Worker version, deploy snapshot-reading code, then run OAuth smoke**
+- [ ] **Step 4: Record current Worker version, deploy snapshot-reading code, then run OAuth smoke**
 
 ```powershell
 npx wrangler deployments list
@@ -467,7 +511,7 @@ npx wrangler deploy
 npm run oauth:login
 ```
 
-Expected live smoke remains:
+Expected live smoke:
 
 ```json
 {"health":true,"metadata":true,"unauthorized":true,"oauth_authenticated":true,"tools":3,"search_result_count":4,"unknown_ref_not_found":true}
@@ -475,11 +519,18 @@ Expected live smoke remains:
 
 If live smoke fails, rollback the Worker to the version recorded immediately before deploy; do not modify the active snapshot pointer while diagnosing Worker code.
 
-- [ ] **Step 5: Reverify principal and active snapshot aggregate state, then document**
+- [ ] **Step 5: Reverify aggregate state and document**
 
-Confirm the principal count is unchanged and active snapshot remains 4,227 rows. Update README with the recurring snapshot publication model; do not include memory text, raw subject hashes, or credentials.
+Run:
 
-- [ ] **Step 6: Commit documentation only**
+```powershell
+npx wrangler d1 execute teddy-memory-plugin-safe --remote --command="SELECT COUNT(*) AS active_principals FROM oauth_principals WHERE owner_id='teddy-primary' AND is_active=1;"
+npx wrangler d1 execute teddy-memory-plugin-safe --remote --command="SELECT COUNT(*) AS active_rows FROM safe_snapshot_memories m JOIN safe_active_snapshot a ON a.snapshot_id=m.snapshot_id WHERE a.owner_id='teddy-primary' AND m.is_active=1;"
+```
+
+Expected: `active_principals=1`, `active_rows=4227`. Update README with the recurring snapshot publication model and no memory text/credentials.
+
+- [ ] **Step 6: Commit documentation**
 
 ```bash
 git add teddy-memory-safe/README.md
