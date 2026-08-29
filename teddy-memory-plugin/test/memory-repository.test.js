@@ -40,7 +40,22 @@ const safeRow = {
   source_note: 'historical_chat_summary',
 };
 
-test('search is owner-scoped, active-only, prepared, and returns public DTOs', async () => {
+function assertPointedSnapshotSql(sql) {
+  assert.match(sql, /FROM\s+safe_active_snapshot\s+active/i);
+  assert.match(sql, /JOIN\s+safe_snapshots\s+snapshot/i);
+  assert.match(sql, /snapshot\.snapshot_id\s*=\s*active\.snapshot_id/i);
+  assert.match(sql, /snapshot\.owner_id\s*=\s*active\.owner_id/i);
+  assert.match(sql, /snapshot\.status\s+IN\s*\(\s*'ready'\s*,\s*'active'\s*\)/i);
+  assert.match(sql, /JOIN\s+safe_snapshot_memories\s+memory/i);
+  assert.match(sql, /memory\.snapshot_id\s*=\s*active\.snapshot_id/i);
+  assert.match(sql, /memory\.owner_id\s*=\s*active\.owner_id/i);
+  assert.match(sql, /active\.owner_id\s*=\s*\?/i);
+  assert.match(sql, /memory\.owner_id\s*=\s*\?/i);
+  assert.match(sql, /memory\.is_active\s*=\s*1/i);
+  assert.doesNotMatch(sql, /FROM\s+safe_memories\b/i);
+}
+
+test('search is owner-scoped through the active pointer and accepts ready or active snapshots', async () => {
   const db = recordingDb({ rows: [safeRow] });
   const repo = createMemoryRepository(db);
 
@@ -53,10 +68,9 @@ test('search is owner-scoped, active-only, prepared, and returns public DTOs', a
 
   assert.equal(db.calls.length, 1);
   const { sql, binds } = db.calls[0];
-  assert.match(sql, /owner_id\s*=\s*\?/i);
-  assert.match(sql, /is_active\s*=\s*1/i);
+  assertPointedSnapshotSql(sql);
   assert.doesNotMatch(sql, /select\s+\*/i);
-  assert.equal(binds[0], 'owner-a');
+  assert.deepEqual(binds.slice(0, 2), ['owner-a', 'owner-a']);
   assert.equal(binds.at(-1), 8);
   assert.match(sql, /order\s+by[\s\S]*score\s+desc/i);
   assert.match(sql, /event_time\s+desc/i);
@@ -98,7 +112,7 @@ test('search escapes LIKE wildcard characters in bind values', async () => {
     limit: 8,
   });
 
-  const patternBinds = db.calls[0].binds.slice(1, -1).filter((value) => typeof value === 'string');
+  const patternBinds = db.calls[0].binds.slice(2, -1).filter((value) => typeof value === 'string');
   assert.ok(patternBinds.length > 0);
   assert.ok(patternBinds.every((value) => value === String.raw`%100\%\_safe\\path%`));
 });
@@ -114,7 +128,7 @@ test('search de-duplicates terms case-insensitively and caps them at eight', asy
     limit: 8,
   });
 
-  const patternBinds = db.calls[0].binds.slice(1, -1).filter((value) => typeof value === 'string');
+  const patternBinds = db.calls[0].binds.slice(2, -1).filter((value) => typeof value === 'string');
   const distinctPatterns = new Set(patternBinds);
   assert.equal(distinctPatterns.size, 8);
   assert.equal(distinctPatterns.has('%EtherCAT%'), true);
@@ -141,7 +155,7 @@ test('search rejects unsafe limits and missing owner before touching D1', async 
   assert.equal(db.calls.length, 0);
 });
 
-test('getByRef is owner-scoped, active-only, exact, and minimized', async () => {
+test('getByRef is owner-scoped through the pointed snapshot, exact, and minimized', async () => {
   const db = recordingDb({ firstRow: safeRow });
   const repo = createMemoryRepository(db);
 
@@ -152,11 +166,10 @@ test('getByRef is owner-scoped, active-only, exact, and minimized', async () => 
 
   assert.equal(db.calls.length, 1);
   const { sql, binds } = db.calls[0];
-  assert.match(sql, /owner_id\s*=\s*\?/i);
-  assert.match(sql, /is_active\s*=\s*1/i);
-  assert.match(sql, /memory_ref\s*=\s*\?/i);
+  assertPointedSnapshotSql(sql);
+  assert.match(sql, /memory\.memory_ref\s*=\s*\?/i);
   assert.doesNotMatch(sql, /select\s+\*/i);
-  assert.deepEqual(binds, ['owner-a', safeRow.memory_ref]);
+  assert.deepEqual(binds, ['owner-a', 'owner-a', safeRow.memory_ref]);
   assert.deepEqual(result, {
     memory_ref: safeRow.memory_ref,
     title: safeRow.title,
