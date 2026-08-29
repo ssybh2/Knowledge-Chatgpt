@@ -51,7 +51,7 @@ function hasCredential(text) {
 }
 
 function hasPaymentCard(text) {
-  const matches = text.match(/(?:\d[ -]?){13,19}/g) || [];
+  const matches = text.match(/(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)/g) || [];
   return matches.some(luhnValid);
 }
 
@@ -71,7 +71,7 @@ function hasAuthSecurityRecord(text) {
 
 function hasPreciseContactOrAddress(text) {
   const email = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
-  const phone = /(?:\+?\d{1,3}[\s-]?)?(?:1[3-9]\d{9}|\d{3}[\s-]?\d{3}[\s-]?\d{4})/;
+  const phone = /(?<!\d)(?:\+?\d{1,3}[\s-]?)?(?:1[3-9]\d{9}|\d{3}[\s-]?\d{3}[\s-]?\d{4})(?!\d)/;
   const address = /(street|road|avenue|lane|路|街|巷|号|室|栋).{0,20}\d+/i;
   return email.test(text) || phone.test(text) || address.test(text);
 }
