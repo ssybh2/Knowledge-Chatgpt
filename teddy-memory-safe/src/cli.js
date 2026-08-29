@@ -40,6 +40,17 @@ function writeJson(ioStream, value) {
   ioStream.write(`${JSON.stringify(value)}\n`);
 }
 
+function sortApprovedRows(rows) {
+  rows.sort((a, b) => {
+    const owner = a.owner_id.localeCompare(b.owner_id);
+    if (owner) return owner;
+    const aTime = a.event_time ?? Number.NEGATIVE_INFINITY;
+    const bTime = b.event_time ?? Number.NEGATIVE_INFINITY;
+    if (aTime !== bTime) return aTime - bTime;
+    return a.id.localeCompare(b.id);
+  });
+}
+
 async function loadConversationTitles(path) {
   const titles = new Map();
   if (!path) return titles;
@@ -142,16 +153,53 @@ async function compileApproved(options, io) {
     }
   }
 
-  approvedRows.sort((a, b) => {
-    const owner = a.owner_id.localeCompare(b.owner_id);
-    if (owner) return owner;
-    const aTime = a.event_time ?? Number.NEGATIVE_INFINITY;
-    const bTime = b.event_time ?? Number.NEGATIVE_INFINITY;
-    if (aTime !== bTime) return aTime - bTime;
-    return a.id.localeCompare(b.id);
-  });
+  sortApprovedRows(approvedRows);
   await writeJsonl(output, approvedRows);
   writeJson(io.stdout, { ok: true, command: 'compile-approved', ...counts });
+  return 0;
+}
+
+async function compileAutoSafe(options, io) {
+  const candidatesPath = requireOption(options, 'candidates');
+  const output = requireOption(options, 'output');
+  const approvedRows = [];
+  const counts = { approved: 0, blocked: 0 };
+
+  for await (const candidate of readJsonl(candidatesPath)) {
+    if (Array.isArray(candidate.blocked_reasons) && candidate.blocked_reasons.length > 0) {
+      counts.blocked += 1;
+      continue;
+    }
+
+    const decision = {
+      candidate_id: candidate.candidate_id,
+      decision: 'approve',
+      category: 'reference',
+      title: candidate.title,
+      summary: candidate.summary,
+      keywords: Array.isArray(candidate.keywords) ? candidate.keywords : [],
+      event_time: candidate.event_time ?? null,
+      revision: Number.isInteger(Number(candidate.revision)) ? Number(candidate.revision) : 1,
+    };
+
+    try {
+      const compiled = compileApprovedMemory(candidate, decision);
+      if (compiled) {
+        approvedRows.push(compiled);
+        counts.approved += 1;
+      }
+    } catch (error) {
+      if (String(error?.message || '').startsWith('safe memory rejected by policy:')) {
+        counts.blocked += 1;
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  sortApprovedRows(approvedRows);
+  await writeJsonl(output, approvedRows);
+  writeJson(io.stdout, { ok: true, command: 'compile-auto-safe', ...counts });
   return 0;
 }
 
@@ -218,9 +266,10 @@ export async function main(argv = process.argv.slice(2), io = { stdout: process.
     const { command, options } = parseArgs(argv);
     if (command === 'build-candidates') return await buildCandidates(options, io);
     if (command === 'compile-approved') return await compileApproved(options, io);
+    if (command === 'compile-auto-safe') return await compileAutoSafe(options, io);
     if (command === 'export-d1') return await exportD1(options, io);
     if (command === 'stats') return await stats(options, io);
-    throw new TypeError('command must be build-candidates, compile-approved, export-d1, or stats');
+    throw new TypeError('command must be build-candidates, compile-approved, compile-auto-safe, export-d1, or stats');
   } catch (error) {
     io.stderr.write(`Error: ${String(error?.message || 'operation failed')}\n`);
     return 1;
