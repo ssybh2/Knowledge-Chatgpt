@@ -1,9 +1,13 @@
 import { createPluginMcpHandler } from './http-handler.js';
 import { createMemoryRepository } from './memory-repository.js';
+import { readOAuthConfig } from './oauth-config.js';
+import { bearerChallenge, protectedResourceMetadata } from './oauth-metadata.js';
 import {
-  StagingAuthConfigurationError,
-  resolveStagingPrincipal,
-} from './staging-auth.js';
+  OAuthAuthenticationError,
+  OAuthInsufficientScopeError,
+  createOAuthTokenValidator,
+} from './oauth-token.js';
+import { createPrincipalRepository } from './principal-repository.js';
 
 function jsonResponse(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), {
@@ -51,7 +55,7 @@ function originHostname(request) {
 
 function boundaryError(status) {
   if (status === 403) return jsonResponse({ error: 'Forbidden' }, 403);
-  return jsonResponse({ error: 'Plugin stage is not configured' }, 500);
+  return jsonResponse({ error: 'Plugin request unavailable' }, 500);
 }
 
 function validateNetworkBoundary(request, env) {
@@ -74,11 +78,11 @@ function validateNetworkBoundary(request, env) {
   return { response: null };
 }
 
-function unauthorized() {
+function oauthFailure(config, { insufficientScope = false } = {}) {
   return jsonResponse(
-    { error: 'Unauthorized' },
-    401,
-    { 'www-authenticate': 'Bearer realm="teddy-memory-plugin-stage"' },
+    { error: insufficientScope ? 'Forbidden' : 'Unauthorized' },
+    insufficientScope ? 403 : 401,
+    { 'www-authenticate': bearerChallenge(config, { insufficientScope }) },
   );
 }
 
@@ -86,19 +90,27 @@ function genericMcpFailure() {
   return jsonResponse({ error: 'Plugin request unavailable' }, 500);
 }
 
+const defaultValidateOAuthRequest = createOAuthTokenValidator();
+
 export function createWorkerFetch({
   createRepository = createMemoryRepository,
   createMcpHandler = createPluginMcpHandler,
-  resolvePrincipal = resolveStagingPrincipal,
+  readConfig = readOAuthConfig,
+  buildMetadata = protectedResourceMetadata,
+  validateOAuthRequest = defaultValidateOAuthRequest,
+  createPrincipalRepository: makePrincipalRepository = createPrincipalRepository,
 } = {}) {
-  if (typeof createRepository !== 'function') {
-    throw new TypeError('createRepository must be a function');
-  }
-  if (typeof createMcpHandler !== 'function') {
-    throw new TypeError('createMcpHandler must be a function');
-  }
-  if (typeof resolvePrincipal !== 'function') {
-    throw new TypeError('resolvePrincipal must be a function');
+  for (const [name, value] of Object.entries({
+    createRepository,
+    createMcpHandler,
+    readConfig,
+    buildMetadata,
+    validateOAuthRequest,
+    makePrincipalRepository,
+  })) {
+    if (typeof value !== 'function') {
+      throw new TypeError(`${name} must be a function`);
+    }
   }
 
   return async function fetchWorker(request, env = {}) {
@@ -108,13 +120,28 @@ export function createWorkerFetch({
       return jsonResponse({
         service: 'teddy-memory-plugin',
         read_only: true,
-        stage: 'plan-2',
+        stage: 'plan-3',
+        auth: 'oauth',
         mcp: '/mcp',
       });
     }
 
     if (request.method === 'GET' && url.pathname === '/healthz') {
       return jsonResponse({ ok: true, service: 'teddy-memory-plugin' });
+    }
+
+    if (
+      request.method === 'GET'
+      && (
+        url.pathname === '/.well-known/oauth-protected-resource'
+        || url.pathname === '/.well-known/oauth-protected-resource/mcp'
+      )
+    ) {
+      try {
+        return jsonResponse(buildMetadata(readConfig(env)));
+      } catch {
+        return genericMcpFailure();
+      }
     }
 
     if (url.pathname !== '/mcp') {
@@ -128,25 +155,41 @@ export function createWorkerFetch({
     const networkBoundary = validateNetworkBoundary(request, env);
     if (networkBoundary.response) return networkBoundary.response;
 
-    let principal;
+    let config;
     try {
-      principal = resolvePrincipal(request, env);
-    } catch (error) {
-      if (error instanceof StagingAuthConfigurationError) {
-        return boundaryError(500);
-      }
+      config = readConfig(env);
+    } catch {
       return genericMcpFailure();
     }
 
-    if (!principal) return unauthorized();
+    let identity;
+    try {
+      identity = await validateOAuthRequest(request, config);
+    } catch (error) {
+      if (error instanceof OAuthInsufficientScopeError) {
+        return oauthFailure(config, { insufficientScope: true });
+      }
+      if (error instanceof OAuthAuthenticationError) {
+        return oauthFailure(config);
+      }
+      return genericMcpFailure();
+    }
 
     try {
       const db = env.SAFE_DB;
       if (!db || typeof db.prepare !== 'function') {
         return genericMcpFailure();
       }
+
+      const principalRepository = makePrincipalRepository(db);
+      const ownerId = await principalRepository.resolveOwner({
+        issuer: identity.issuer,
+        subject: identity.subject,
+      });
+      if (!ownerId) return boundaryError(403);
+
       const repository = createRepository(db);
-      const handler = createMcpHandler(repository, principal.ownerId);
+      const handler = createMcpHandler(repository, ownerId);
       return await handler.fetch(request);
     } catch {
       return genericMcpFailure();
