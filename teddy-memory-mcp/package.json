@@ -8,6 +8,7 @@
   },
   "scripts": {
     "test": "node --test",
+    "smoke": "node --check src/index.js && node --input-type=module -e \"await import('./src/server.js'); await import('./src/memory-client.js')\"",
     "start": "node src/index.js"
   },
   "dependencies": {
