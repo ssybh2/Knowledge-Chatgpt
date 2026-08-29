@@ -25,9 +25,11 @@
 - Public outward memory fields remain exactly `memory_ref`, `title`, `category`, `summary`, optional `event_time`, `revision`.
 - Every safe-memory D1 read remains SQL-scoped with `WHERE owner_id = ? AND is_active = 1` and prepared `.bind(...)` values.
 - Restricted-query checks remain before safe-memory repository access.
-- Raw Auth0 access tokens, client secrets, raw `sub`, subject hashes, memory bodies, and private credentials must never be printed by CI or live-smoke output.
+- Raw Auth0 access tokens, client secrets, raw `sub`, real subject hashes, memory bodies, and private credentials must never be printed by CI or live-smoke output.
 - The currently deployed Plan 2 Worker remains the rollback target until OAuth live verification succeeds.
-- As of 2026-08-29, current OpenAI product documentation lists custom MCP developer-mode support for Business/Enterprise/Edu and read/fetch MCP support for Pro; do not claim ChatGPT account-linking verification from an unsupported plan. OAuth Worker verification can still proceed with Auth0-issued tokens and MCP smoke tests until a supported ChatGPT plan/workspace is available.
+- As of 2026-08-29, current OpenAI product documentation lists custom MCP developer-mode support for Business/Enterprise/Edu and read/fetch MCP support for Pro. If the available ChatGPT plan/workspace does not expose custom MCP OAuth setup, record the account-linking gate as product-availability blocked; do not fabricate completion.
+- Development command convention: all commands below run from the repository root unless the block is explicitly labeled **PowerShell operator command**. Use `npm --prefix teddy-memory-plugin ...` or direct paths so a prior command cannot silently change the working directory for a later Git step.
+- TDD convention: every implementation task commits RED tests before the GREEN implementation commit.
 
 ---
 
@@ -35,28 +37,29 @@
 
 ### New runtime modules
 
-- `teddy-memory-plugin/src/oauth-config.js` — parse and validate issuer/resource/scope configuration and derive the RFC 9728 metadata URL.
-- `teddy-memory-plugin/src/oauth-metadata.js` — build protected-resource metadata and standards-compatible `WWW-Authenticate` challenges.
-- `teddy-memory-plugin/src/oauth-token.js` — parse Bearer tokens, fetch/cache Auth0 JWKS with `jose`, validate RS256 issuer/audience/time claims, and enforce `memory:read`.
-- `teddy-memory-plugin/src/principal-repository.js` — SHA-256 subject hashing and prepared owner mapping against `oauth_principals`.
+- `teddy-memory-plugin/src/oauth-config.js` — validate issuer/resource/scope and derive discovery URLs.
+- `teddy-memory-plugin/src/oauth-metadata.js` — build RFC 9728 metadata and `WWW-Authenticate` challenges.
+- `teddy-memory-plugin/src/oauth-token.js` — strict Bearer parsing, Auth0 JWKS retrieval/cache, RS256 JWT validation, and scope enforcement.
+- `teddy-memory-plugin/src/principal-repository.js` — SHA-256 subject hashing and prepared D1 owner mapping.
 
-### New operator/schema files
+### New schema/operator files
 
-- `teddy-memory-plugin/sql/001_oauth_principals.sql` — idempotent table/index creation only; no real identity row.
-- `teddy-memory-plugin/scripts/subject-hash.mjs` — local-only helper that reads issuer + raw subject from environment and prints only the deterministic hash.
-- `teddy-memory-plugin/docs/AUTH0_RUNBOOK.md` — exact Auth0, D1 mapping, cutover, rollback, and post-cutover verification procedure without secrets.
+- `teddy-memory-plugin/sql/001_oauth_principals.sql` — idempotent identity-mapping schema only; never a real identity row.
+- `teddy-memory-plugin/scripts/subject-hash.mjs` — import-safe local helper that prints only a deterministic subject hash when executed as the main program.
+- `teddy-memory-plugin/docs/AUTH0_RUNBOOK.md` — Auth0 setup, mapping, cutover, rollback, and post-cutover checks without secrets.
 
 ### Modified runtime/config files
 
-- `teddy-memory-plugin/src/worker.js` — replace staging principal resolution with OAuth config -> JWT validation -> D1 principal mapping -> existing MCP handler.
-- `teddy-memory-plugin/package.json` — add `jose` 6.2.10 and subject-hash/live OAuth scripts.
-- `teddy-memory-plugin/wrangler.jsonc` — remove `PLUGIN_DEV_OWNER_ID`; track canonical resource/scope; add real public Auth0 issuer only after the operator creates the tenant.
-- `teddy-memory-plugin/scripts/live-smoke.mjs` — replace staging token input with OAuth access token input and add protected-resource metadata checks.
-- `teddy-memory-plugin/README.md` — describe OAuth-only Plan 3 boundary and point to the runbook.
-- `.github/workflows/teddy-memory-plugin.yml` — retain the same install/test/smoke/dry-run gate; no Auth0 secret is added to GitHub Actions.
-- `TEDDY_MEMORY_PLUGIN_ROADMAP.md` — update only after live OAuth cutover passes.
+- `teddy-memory-plugin/src/worker.js`
+- `teddy-memory-plugin/package.json`
+- `teddy-memory-plugin/package-lock.json`
+- `teddy-memory-plugin/wrangler.jsonc`
+- `teddy-memory-plugin/scripts/live-smoke.mjs`
+- `teddy-memory-plugin/README.md`
+- `.github/workflows/teddy-memory-plugin.yml` only if path/test coverage needs adjustment.
+- `TEDDY_MEMORY_PLUGIN_ROADMAP.md` only after live gates actually pass.
 
-### Removed Plan 2 staging modules after OAuth integration is green
+### Removed after the OAuth Worker is green
 
 - `teddy-memory-plugin/src/staging-auth.js`
 - `teddy-memory-plugin/test/staging-auth.test.js`
@@ -68,13 +71,14 @@
 - `teddy-memory-plugin/test/oauth-token.test.js`
 - `teddy-memory-plugin/test/principal-repository.test.js`
 - `teddy-memory-plugin/test/subject-hash.test.js`
+- `teddy-memory-plugin/test/config-boundary.test.js`
 - `teddy-memory-plugin/test/worker.test.js`
 - `teddy-memory-plugin/test/live-smoke.test.js`
-- existing DTO/repository/query-policy/tool tests remain regression coverage.
+- Existing DTO, memory-repository, query-policy, tool-contract, tool-handler, and HTTP-handler tests remain regression coverage.
 
 ---
 
-### Task 1: OAuth Configuration and RFC 9728 Metadata
+## Task 1: OAuth Configuration and RFC 9728 Metadata
 
 **Files:**
 - Create: `teddy-memory-plugin/src/oauth-config.js`
@@ -86,11 +90,8 @@
 - Produces: `readOAuthConfig(env) -> { issuer, resource, requiredScope, metadataUrl }`
 - Produces: `protectedResourceMetadata(config) -> object`
 - Produces: `bearerChallenge(config, { insufficientScope = false } = {}) -> string`
-- Later tasks consume these exact exports from `worker.js` and `oauth-token.js`.
 
-- [ ] **Step 1: Write failing configuration tests**
-
-Test exact valid output and fail-closed invalid inputs:
+- [ ] **Step 1: Write failing config tests**
 
 ```js
 import test from 'node:test';
@@ -103,7 +104,7 @@ const validEnv = {
   PLUGIN_OAUTH_REQUIRED_SCOPE: 'memory:read',
 };
 
-test('readOAuthConfig returns canonical OAuth settings', () => {
+test('readOAuthConfig returns canonical settings', () => {
   assert.deepEqual(readOAuthConfig(validEnv), {
     issuer: 'https://tenant.example.auth0.com/',
     resource: 'https://teddy-memory-plugin.3767174214.workers.dev/mcp',
@@ -112,13 +113,11 @@ test('readOAuthConfig returns canonical OAuth settings', () => {
   });
 });
 
-test('OAuth config fails closed for missing or non-HTTPS issuer/resource', () => {
+test('config fails closed for malformed issuer/resource/scope', () => {
   assert.throws(() => readOAuthConfig({ ...validEnv, PLUGIN_OAUTH_ISSUER: '' }));
   assert.throws(() => readOAuthConfig({ ...validEnv, PLUGIN_OAUTH_ISSUER: 'http://tenant.example/' }));
   assert.throws(() => readOAuthConfig({ ...validEnv, PLUGIN_OAUTH_RESOURCE: 'http://plugin.example/mcp' }));
-});
-
-test('OAuth config requires memory:read exactly', () => {
+  assert.throws(() => readOAuthConfig({ ...validEnv, PLUGIN_OAUTH_RESOURCE: 'https://plugin.example/other' }));
   assert.throws(() => readOAuthConfig({ ...validEnv, PLUGIN_OAUTH_REQUIRED_SCOPE: 'memory:write' }));
 });
 ```
@@ -137,7 +136,7 @@ const config = {
   metadataUrl: 'https://teddy-memory-plugin.3767174214.workers.dev/.well-known/oauth-protected-resource',
 };
 
-test('metadata advertises only the public resource and memory:read', () => {
+test('metadata advertises only resource, issuer, and memory:read', () => {
   const metadata = protectedResourceMetadata(config);
   assert.deepEqual(metadata, {
     resource: config.resource,
@@ -147,7 +146,7 @@ test('metadata advertises only the public resource and memory:read', () => {
   assert.equal(JSON.stringify(metadata).includes('offline_access'), false);
 });
 
-test('anonymous and insufficient-scope challenges point at resource metadata', () => {
+test('challenges point at protected-resource metadata', () => {
   assert.equal(
     bearerChallenge(config),
     `Bearer resource_metadata="${config.metadataUrl}", scope="memory:read"`,
@@ -159,45 +158,54 @@ test('anonymous and insufficient-scope challenges point at resource metadata', (
 });
 ```
 
-- [ ] **Step 3: Run tests and confirm RED**
-
-Run:
+- [ ] **Step 3: Verify RED**
 
 ```bash
-cd teddy-memory-plugin
-node --test test/oauth-config.test.js test/oauth-metadata.test.js
+node --test teddy-memory-plugin/test/oauth-config.test.js teddy-memory-plugin/test/oauth-metadata.test.js
 ```
 
-Expected: FAIL because `oauth-config.js` and `oauth-metadata.js` do not exist.
+Expected: FAIL because the two runtime modules do not exist.
 
-- [ ] **Step 4: Commit the RED tests**
+- [ ] **Step 4: Commit RED**
 
 ```bash
 git add teddy-memory-plugin/test/oauth-config.test.js teddy-memory-plugin/test/oauth-metadata.test.js
 git commit -m "test: add failing oauth metadata coverage"
 ```
 
-- [ ] **Step 5: Implement minimal configuration parsing**
+- [ ] **Step 5: Implement config parser**
 
-`oauth-config.js` must use URL parsing, require HTTPS, require issuer trailing `/`, require resource pathname `/mcp` with no query/hash, and require `memory:read` exactly. Derive `metadataUrl` from `new URL('/.well-known/oauth-protected-resource', resource)`.
+Use a private `requireHttpsUrl` helper. Requirements:
 
-Core shape:
+```text
+issuer: HTTPS, origin-root URL, no query/hash, canonical trailing slash
+resource: HTTPS, pathname exactly /mcp, no query/hash
+scope: exactly memory:read
+metadataUrl: resource origin + /.well-known/oauth-protected-resource
+```
+
+Core implementation shape:
 
 ```js
 export function readOAuthConfig(env = {}) {
-  const issuer = requireHttpsUrl(env.PLUGIN_OAUTH_ISSUER, 'PLUGIN_OAUTH_ISSUER', { trailingSlash: true });
+  const issuer = requireHttpsUrl(env.PLUGIN_OAUTH_ISSUER, 'PLUGIN_OAUTH_ISSUER', {
+    rootPathOnly: true,
+    trailingSlash: true,
+  });
   const resource = requireHttpsUrl(env.PLUGIN_OAUTH_RESOURCE, 'PLUGIN_OAUTH_RESOURCE');
   const resourceUrl = new URL(resource);
-  if (resourceUrl.pathname !== '/mcp' || resourceUrl.search || resourceUrl.hash) throw new Error('OAuth resource is invalid');
+  if (resourceUrl.pathname !== '/mcp' || resourceUrl.search || resourceUrl.hash) {
+    throw new Error('OAuth resource is invalid');
+  }
 
   const requiredScope = String(env.PLUGIN_OAUTH_REQUIRED_SCOPE || '').trim();
   if (requiredScope !== 'memory:read') throw new Error('OAuth scope is invalid');
 
   return {
     issuer,
-    resource,
+    resource: resourceUrl.toString(),
     requiredScope,
-    metadataUrl: new URL('/.well-known/oauth-protected-resource', resourceUrl).toString(),
+    metadataUrl: `${resourceUrl.origin}/.well-known/oauth-protected-resource`,
   };
 }
 ```
@@ -222,14 +230,14 @@ export function bearerChallenge(config, { insufficientScope = false } = {}) {
 }
 ```
 
-- [ ] **Step 7: Run focused and full tests**
+- [ ] **Step 7: Verify GREEN**
 
 ```bash
-node --test test/oauth-config.test.js test/oauth-metadata.test.js
-npm test
+node --test teddy-memory-plugin/test/oauth-config.test.js teddy-memory-plugin/test/oauth-metadata.test.js
+npm --prefix teddy-memory-plugin test
 ```
 
-Expected: both commands PASS.
+Expected: PASS.
 
 - [ ] **Step 8: Commit GREEN**
 
@@ -240,26 +248,33 @@ git commit -m "feat: add oauth resource metadata helpers"
 
 ---
 
-### Task 2: RS256 Auth0 JWT + JWKS Validation
+## Task 2: Strict Auth0 RS256 JWT + JWKS Validation
 
 **Files:**
 - Modify: `teddy-memory-plugin/package.json`
+- Modify: `teddy-memory-plugin/package-lock.json`
 - Create: `teddy-memory-plugin/src/oauth-token.js`
 - Create: `teddy-memory-plugin/test/oauth-token.test.js`
 
 **Interfaces:**
-- Consumes: `config` from `readOAuthConfig`.
-- Produces: `OAuthAuthenticationError`, `OAuthInsufficientScopeError`.
-- Produces: `createOAuthTokenValidator({ fetchImpl = fetch } = {}) -> async validateOAuthRequest(request, config)`.
-- Successful return: `{ issuer: string, subject: string, scopes: string[] }`.
+- Produces: `OAuthAuthenticationError`
+- Produces: `OAuthInsufficientScopeError extends OAuthAuthenticationError`
+- Produces: `createOAuthTokenValidator({ fetchImpl = fetch } = {}) -> validateOAuthRequest(request, config)`
+- Successful validation returns `{ issuer, subject, scopes }`.
 
-- [ ] **Step 1: Add failing token-validation tests using local RSA fixtures**
+- [ ] **Step 1: Pin JOSE dependency**
 
-Use `jose` test helpers after adding the dependency in the same RED commit. Generate a key pair in test setup, export the public JWK with `kid: 'test-key'`, and mock JWKS fetch.
+```bash
+npm --prefix teddy-memory-plugin install --save-exact jose@6.2.10
+```
+
+- [ ] **Step 2: Write failing token tests with local RSA keys**
+
+Use `generateKeyPair`, `exportJWK`, and `SignJWT` from `jose`. Set public fixture JWK fields `kid='test-key'`, `use='sig'`, `alg='RS256'`. Mock JWKS fetch at the issuer's `.well-known/jwks.json` URL.
 
 Required cases:
 
-```js
+```text
 valid RS256 + correct iss/aud/scope/sub -> accepted
 wrong issuer -> OAuthAuthenticationError
 wrong audience -> OAuthAuthenticationError
@@ -267,50 +282,39 @@ expired exp -> OAuthAuthenticationError
 future nbf -> OAuthAuthenticationError
 missing sub -> OAuthAuthenticationError
 missing memory:read -> OAuthInsufficientScopeError
-HS256 token -> OAuthAuthenticationError
-JWKS HTTP 500 -> OAuthAuthenticationError
+HS256 -> OAuthAuthenticationError
+JWKS 500/network failure -> OAuthAuthenticationError
 ```
 
-Use this signing pattern:
+Signing pattern:
 
 ```js
 const token = await new SignJWT({ scope: 'openid memory:read' })
   .setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
   .setIssuer(config.issuer)
   .setAudience(config.resource)
-  .setSubject('auth0|test-user')
+  .setSubject('auth0|synthetic-test-user')
   .setIssuedAt()
   .setExpirationTime('5m')
   .sign(privateKey);
 ```
 
-- [ ] **Step 2: Pin `jose` and run the tests RED**
-
-Modify dependencies to include:
-
-```json
-"jose": "6.2.10"
-```
-
-Then:
+- [ ] **Step 3: Verify RED**
 
 ```bash
-npm install
-node --test test/oauth-token.test.js
+node --test teddy-memory-plugin/test/oauth-token.test.js
 ```
 
-Expected: FAIL because `src/oauth-token.js` is absent.
+Expected: FAIL because `src/oauth-token.js` does not exist.
 
-- [ ] **Step 3: Commit RED**
+- [ ] **Step 4: Commit RED**
 
 ```bash
 git add teddy-memory-plugin/package.json teddy-memory-plugin/package-lock.json teddy-memory-plugin/test/oauth-token.test.js
 git commit -m "test: add failing auth0 token validation coverage"
 ```
 
-- [ ] **Step 4: Implement strict Bearer parsing and Auth0 JWKS validation**
-
-Use `jose` 6.2.10 `createRemoteJWKSet`, `customFetch`, and `jwtVerify`:
+- [ ] **Step 5: Implement validator with `createRemoteJWKSet`**
 
 ```js
 import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
@@ -327,8 +331,7 @@ export function createOAuthTokenValidator({ fetchImpl = fetch } = {}) {
 
     let keySet = keySets.get(config.issuer);
     if (!keySet) {
-      const jwksUrl = new URL('.well-known/jwks.json', config.issuer);
-      keySet = createRemoteJWKSet(jwksUrl, {
+      keySet = createRemoteJWKSet(new URL('.well-known/jwks.json', config.issuer), {
         timeoutDuration: 5000,
         cooldownDuration: 30000,
         cacheMaxAge: 600000,
@@ -364,18 +367,18 @@ export function createOAuthTokenValidator({ fetchImpl = fetch } = {}) {
 }
 ```
 
-Never expose the caught JOSE error to callers.
+`bearerToken` must accept only `Authorization: Bearer <non-empty token>`. Never return JOSE exception text.
 
-- [ ] **Step 5: Run token tests and the full suite**
+- [ ] **Step 6: Verify GREEN**
 
 ```bash
-node --test test/oauth-token.test.js
-npm test
+node --test teddy-memory-plugin/test/oauth-token.test.js
+npm --prefix teddy-memory-plugin test
 ```
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit GREEN**
+- [ ] **Step 7: Commit GREEN**
 
 ```bash
 git add teddy-memory-plugin/src/oauth-token.js
@@ -384,7 +387,7 @@ git commit -m "feat: validate auth0 rs256 access tokens"
 
 ---
 
-### Task 3: Hashed Auth0 Principal Mapping in Safe D1
+## Task 3: Hashed Auth0 Principal Mapping in Safe D1
 
 **Files:**
 - Create: `teddy-memory-plugin/src/principal-repository.js`
@@ -392,74 +395,59 @@ git commit -m "feat: validate auth0 rs256 access tokens"
 - Create: `teddy-memory-plugin/test/principal-repository.test.js`
 
 **Interfaces:**
-- Produces: `subjectHash(issuer, subject) -> Promise<string>` returning 64 lowercase hex characters.
+- Produces: `subjectHash(issuer, subject) -> Promise<string>` with 64 lowercase hex characters.
 - Produces: `createPrincipalRepository(db) -> { resolveOwner({ issuer, subject }) -> Promise<string|null> }`.
-- Later `worker.js` consumes `resolveOwner` only after token validation succeeds.
 
-- [ ] **Step 1: Write failing hashing and SQL-scope tests**
+- [ ] **Step 1: Write failing repository/schema tests**
 
-Tests must verify:
+Tests must prove:
 
-```js
-subjectHash is deterministic
-issuer changes produce a different hash
-subject changes produce a different hash
-raw subject never appears in SQL text
-resolveOwner binds issuer + 64-char hash
-SQL includes issuer = ?, subject_hash = ?, is_active = 1
+```text
+hash deterministic
+issuer change changes hash
+subject change changes hash
+SQL text never contains raw subject
+resolveOwner binds exact issuer + 64-char hash
+SQL has issuer = ?, subject_hash = ?, is_active = 1
 known row returns owner_id
 missing row returns null
+migration has issuer, subject_hash, owner_id, is_active, composite PK
+migration has no raw subject column
 ```
 
-Use a fake D1 statement object that records SQL and `.bind(...)` arguments.
+Use a fake D1 statement that records `.prepare(sql)`, `.bind(...)`, and `.first()`.
 
-- [ ] **Step 2: Write failing schema test**
-
-Read `sql/001_oauth_principals.sql` and assert it contains exactly the identity boundary columns:
-
-```sql
-issuer TEXT NOT NULL
-subject_hash TEXT NOT NULL
-owner_id TEXT NOT NULL
-is_active INTEGER NOT NULL DEFAULT 1
-PRIMARY KEY (issuer, subject_hash)
-```
-
-and does **not** contain a raw `subject TEXT` column.
-
-- [ ] **Step 3: Run RED and commit tests**
+- [ ] **Step 2: Verify RED**
 
 ```bash
-node --test test/principal-repository.test.js
+node --test teddy-memory-plugin/test/principal-repository.test.js
 ```
 
 Expected: FAIL because runtime/schema files do not exist.
+
+- [ ] **Step 3: Commit RED**
 
 ```bash
 git add teddy-memory-plugin/test/principal-repository.test.js
 git commit -m "test: add failing oauth principal mapping coverage"
 ```
 
-- [ ] **Step 4: Implement deterministic Web Crypto hashing**
+- [ ] **Step 4: Implement hash and repository**
 
 ```js
 export async function subjectHash(issuer, subject) {
   const canonicalIssuer = String(issuer || '').trim();
   const rawSubject = String(subject || '').trim();
   if (!canonicalIssuer || !rawSubject) throw new TypeError('issuer and subject are required');
-
-  const bytes = new TextEncoder().encode(`${canonicalIssuer}\0${rawSubject}`);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  const input = new TextEncoder().encode(`${canonicalIssuer}\0${rawSubject}`);
+  const digest = await crypto.subtle.digest('SHA-256', input);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }
-```
 
-- [ ] **Step 5: Implement prepared principal lookup**
-
-```js
 export function createPrincipalRepository(db) {
   if (!db || typeof db.prepare !== 'function') throw new TypeError('A D1-compatible database is required');
-
   return {
     async resolveOwner({ issuer, subject }) {
       const hash = await subjectHash(issuer, subject);
@@ -475,7 +463,7 @@ export function createPrincipalRepository(db) {
 }
 ```
 
-- [ ] **Step 6: Add idempotent schema migration**
+- [ ] **Step 5: Add idempotent schema**
 
 ```sql
 CREATE TABLE IF NOT EXISTS oauth_principals (
@@ -490,18 +478,18 @@ CREATE INDEX IF NOT EXISTS idx_oauth_principals_owner_active
   ON oauth_principals(owner_id, is_active);
 ```
 
-No real issuer, subject hash, or owner row is committed in this migration.
+No real identity row appears in Git.
 
-- [ ] **Step 7: Run focused and full tests**
+- [ ] **Step 6: Verify GREEN**
 
 ```bash
-node --test test/principal-repository.test.js
-npm test
+node --test teddy-memory-plugin/test/principal-repository.test.js
+npm --prefix teddy-memory-plugin test
 ```
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit GREEN**
+- [ ] **Step 7: Commit GREEN**
 
 ```bash
 git add teddy-memory-plugin/src/principal-repository.js teddy-memory-plugin/sql/001_oauth_principals.sql
@@ -510,7 +498,7 @@ git commit -m "feat: map oauth principals to safe owners"
 
 ---
 
-### Task 4: Replace the Staging Gate with an OAuth-Only Worker
+## Task 4: Replace the Staging Gate with an OAuth-Only Worker
 
 **Files:**
 - Modify: `teddy-memory-plugin/src/worker.js`
@@ -519,8 +507,6 @@ git commit -m "feat: map oauth principals to safe owners"
 - Delete after GREEN: `teddy-memory-plugin/test/staging-auth.test.js`
 
 **Interfaces:**
-- Consumes: `readOAuthConfig`, `protectedResourceMetadata`, `bearerChallenge`, `createOAuthTokenValidator`, `createPrincipalRepository`, existing `createMemoryRepository`, existing `createPluginMcpHandler`.
-- Worker dependency injection becomes:
 
 ```js
 createWorkerFetch({
@@ -531,37 +517,39 @@ createWorkerFetch({
 } = {})
 ```
 
-- [ ] **Step 1: Rewrite worker boundary tests to describe OAuth-only behavior**
+`createTokenValidator()` returns the Task 2 validation function. `createPrincipalStore(db)` returns the Task 3 repository.
 
-Replace staging-specific assertions with these cases:
+- [ ] **Step 1: Rewrite worker tests for OAuth-only behavior**
+
+Required cases:
 
 ```text
-GET / remains public and read_only=true
-GET /healthz remains minimal
-GET /.well-known/oauth-protected-resource returns RFC9728 metadata
-GET /.well-known/oauth-protected-resource/mcp returns same metadata
-unknown host is rejected before auth or D1
-blocked Origin is rejected before auth or D1
-missing OAuth config returns generic 500 without D1
-anonymous /mcp -> 401 + resource_metadata + memory:read, no D1
+GET / public, read_only=true
+GET /healthz minimal
+GET /.well-known/oauth-protected-resource -> metadata
+GET /.well-known/oauth-protected-resource/mcp -> same metadata
+unknown Host rejected before auth/D1
+blocked Origin rejected before auth/D1
+missing OAuth config -> generic 500, no D1
+anonymous /mcp -> 401 challenge, no D1
 invalid token -> 401, no D1
 valid token missing memory:read -> 403 insufficient_scope, no D1
-valid token + unknown/inactive principal -> 403 generic, principal lookup only, no memory repository
+valid token + unknown/inactive principal -> generic 403, principal query only, no memory repository
 valid token + mapped principal -> mapped owner_id reaches MCP handler
-missing SAFE_DB after valid token -> generic 500
-GET /mcp -> 405 without D1
-no path accepts PLUGIN_DEV_ACCESS_TOKEN as fallback
+valid token + missing SAFE_DB -> generic 500
+GET /mcp -> 405, no D1
+PLUGIN_DEV_ACCESS_TOKEN cannot authenticate any path
 ```
 
-Use injected `createTokenValidator` so worker boundary tests do not perform crypto/JWKS work.
+Inject fake token/principal functions so these boundary tests do not contact JWKS.
 
-- [ ] **Step 2: Run worker test RED**
+- [ ] **Step 2: Verify RED**
 
 ```bash
-node --test test/worker.test.js
+node --test teddy-memory-plugin/test/worker.test.js
 ```
 
-Expected: FAIL because the Worker still uses staging auth.
+Expected: FAIL because Worker still uses Plan 2 staging auth.
 
 - [ ] **Step 3: Commit RED**
 
@@ -570,72 +558,69 @@ git add teddy-memory-plugin/test/worker.test.js
 git commit -m "test: require oauth-only worker boundary"
 ```
 
-- [ ] **Step 4: Implement public metadata routes before `/mcp` auth**
+- [ ] **Step 4: Implement public metadata routes**
 
-Route both:
+Both GET routes must call `readOAuthConfig(env)` then `protectedResourceMetadata(config)` and return `cache-control: no-store`:
 
 ```text
 /.well-known/oauth-protected-resource
 /.well-known/oauth-protected-resource/mcp
 ```
 
-through `readOAuthConfig(env)` and `protectedResourceMetadata(config)`. Return `cache-control: no-store`. Invalid configuration returns generic 500 without issuer/config detail.
+Invalid OAuth config returns generic HTTP 500 without config detail.
 
-- [ ] **Step 5: Implement OAuth request order**
-
-The `/mcp` path order MUST be:
+- [ ] **Step 5: Implement exact `/mcp` order**
 
 ```text
-method/path check
+path/method
 -> host/origin boundary
--> read OAuth config
--> validate OAuth token + scope
+-> readOAuthConfig
+-> OAuth token signature/claims/scope validation
 -> access SAFE_DB
--> resolve Auth0 principal through oauth_principals
--> if mapped, create existing safe-memory repository
+-> resolve principal through oauth_principals
+-> only if mapped: create existing safe-memory repository
 -> create existing MCP handler with mapped owner_id
--> forward request
+-> handler.fetch(request)
 ```
 
-Invalid token/missing token must never read `SAFE_DB`. Missing scope must never read `SAFE_DB`. Unknown principal may query only `oauth_principals`; it must not create or call the memory repository.
+Invalid token and missing scope must never read `SAFE_DB`. Unknown principal may query only `oauth_principals`; it must not construct/call the safe-memory repository.
 
-- [ ] **Step 6: Return standards-compatible auth failures**
+- [ ] **Step 6: Implement responses**
 
-Anonymous/invalid token:
+Invalid/anonymous token:
 
 ```text
 HTTP 401
 WWW-Authenticate: Bearer resource_metadata=".../.well-known/oauth-protected-resource", scope="memory:read"
-body: {"error":"Unauthorized"}
+{"error":"Unauthorized"}
 ```
 
-Valid token without scope:
+Insufficient scope:
 
 ```text
 HTTP 403
 WWW-Authenticate: Bearer error="insufficient_scope", resource_metadata=".../.well-known/oauth-protected-resource", scope="memory:read"
-body: {"error":"Forbidden"}
+{"error":"Forbidden"}
 ```
 
-Unknown/inactive mapped principal: generic 403 without `sub`, hash, or owner details.
+Unknown/inactive principal: generic HTTP 403 with no identity detail.
 
-- [ ] **Step 7: Remove staging implementation and tests**
+- [ ] **Step 7: Remove staging implementation**
 
-Delete:
-
-```text
-src/staging-auth.js
-test/staging-auth.test.js
-```
-
-Search the package for `PLUGIN_DEV_ACCESS_TOKEN`, `PLUGIN_DEV_OWNER_ID`, and `teddy-memory-plugin-stage`; no runtime/test reference may remain except migration/history documentation that explicitly describes Plan 2 retirement.
-
-- [ ] **Step 8: Run focused and full verification**
+Delete staging source/test, then search:
 
 ```bash
-node --test test/worker.test.js
-npm test
-npm run smoke
+git grep -n -E 'PLUGIN_DEV_ACCESS_TOKEN|PLUGIN_DEV_OWNER_ID|teddy-memory-plugin-stage' -- teddy-memory-plugin
+```
+
+Expected after Task 4: no runtime/test hits. Historical README/runbook references are handled in Task 6.
+
+- [ ] **Step 8: Verify GREEN**
+
+```bash
+node --test teddy-memory-plugin/test/worker.test.js
+npm --prefix teddy-memory-plugin test
+npm --prefix teddy-memory-plugin run smoke
 ```
 
 Expected: PASS.
@@ -649,7 +634,7 @@ git commit -m "feat: protect plugin worker with auth0 oauth"
 
 ---
 
-### Task 5: OAuth Live Smoke and Local Subject-Hash Helper
+## Task 5: OAuth Live Smoke + Import-Safe Subject Hash Helper
 
 **Files:**
 - Modify: `teddy-memory-plugin/scripts/live-smoke.mjs`
@@ -659,62 +644,72 @@ git commit -m "feat: protect plugin worker with auth0 oauth"
 - Modify: `teddy-memory-plugin/package.json`
 
 **Interfaces:**
-- `live-smoke.mjs` consumes `TEDDY_PLUGIN_URL` and `PLUGIN_OAUTH_ACCESS_TOKEN`; never reads the staging token.
-- `subject-hash.mjs` consumes local `PLUGIN_OAUTH_ISSUER` and `PLUGIN_OAUTH_SUBJECT`; stdout is exactly one 64-char lowercase hash line.
+- `live-smoke.mjs` consumes `TEDDY_PLUGIN_URL` and local `PLUGIN_OAUTH_ACCESS_TOKEN`.
+- `subject-hash.mjs` exports `main(env, io)` and executes it only when the module itself is the CLI entry point.
 
-- [ ] **Step 1: Update live-smoke tests first**
+- [ ] **Step 1: Write failing OAuth live-smoke tests**
 
-Require the fake request sequence to prove:
+Fake HTTP sequence must prove:
 
 ```text
-GET /healthz -> 200
-GET /.well-known/oauth-protected-resource -> resource + memory:read, no offline_access
-anonymous POST /mcp -> 401 with resource_metadata
-OAuth initialize -> success
-OAuth tools/list -> exactly three tools
-OAuth search_memory benign query -> array result, internal fields absent
-OAuth get_memory_item unknown ref -> memory:null
+health 200
+protected-resource metadata 200, canonical resource, memory:read, no offline_access
+anonymous /mcp 401 + resource_metadata
+OAuth initialize success
+OAuth tools/list exactly get_context/get_memory_item/search_memory
+OAuth search_memory benign query, count only
+unknown memory_ref -> memory:null
 ```
 
-Final stdout object must be exactly aggregate/non-content fields:
+Exact aggregate stdout object:
 
 ```json
 {"health":true,"metadata":true,"anonymous_401":true,"oauth_authenticated":true,"tools":3,"search_result_count":4,"unknown_ref_not_found":true}
 ```
 
-- [ ] **Step 2: Add subject-hash helper tests**
+- [ ] **Step 2: Write failing subject-hash helper tests**
 
-Spawn the script with test env values and assert stdout is only `/^[0-9a-f]{64}\n?$/`; assert neither issuer nor raw subject appears in stdout/stderr.
+Import `main` safely and also spawn the CLI with synthetic env. Assert stdout is only `/^[0-9a-f]{64}\n?$/` and does not contain issuer/raw synthetic subject.
 
-- [ ] **Step 3: Run RED and commit tests**
+- [ ] **Step 3: Verify RED**
 
 ```bash
-node --test test/live-smoke.test.js test/subject-hash.test.js
+node --test teddy-memory-plugin/test/live-smoke.test.js teddy-memory-plugin/test/subject-hash.test.js
 ```
 
-Expected: FAIL because scripts still implement Plan 2 behavior / helper is absent.
+Expected: FAIL because Plan 2 smoke still expects staging token and helper is absent.
+
+- [ ] **Step 4: Commit RED**
 
 ```bash
 git add teddy-memory-plugin/test/live-smoke.test.js teddy-memory-plugin/test/subject-hash.test.js
 git commit -m "test: add failing oauth live smoke coverage"
 ```
 
-- [ ] **Step 4: Implement OAuth live-smoke inputs**
+- [ ] **Step 5: Convert live smoke to OAuth token input**
 
-Rename the environment token input to `PLUGIN_OAUTH_ACCESS_TOKEN`. Never include it in thrown errors. Keep MCP body inspection limited to structural assertions and counts.
+Use only `PLUGIN_OAUTH_ACCESS_TOKEN`; never echo it in errors. Validate metadata/challenge before authenticated MCP calls. Continue structural DTO/internal-field checks without printing memory title/summary.
 
-- [ ] **Step 5: Implement the local hash helper**
+- [ ] **Step 6: Implement an import-safe subject hash CLI**
 
 ```js
+import { pathToFileURL } from 'node:url';
 import { subjectHash } from '../src/principal-repository.js';
 
-const issuer = String(process.env.PLUGIN_OAUTH_ISSUER || '').trim();
-const subject = String(process.env.PLUGIN_OAUTH_SUBJECT || '').trim();
-if (!issuer || !subject) {
-  console.error('PLUGIN_OAUTH_ISSUER and PLUGIN_OAUTH_SUBJECT are required locally');
-  process.exitCode = 1;
-} else {
-  console.log(await subjectHash(issuer, subject));
+export async function main(env = process.env, io = console) {
+  const issuer = String(env.PLUGIN_OAUTH_ISSUER || '').trim();
+  const subject = String(env.PLUGIN_OAUTH_SUBJECT || '').trim();
+  if (!issuer || !subject) {
+    io.error('PLUGIN_OAUTH_ISSUER and PLUGIN_OAUTH_SUBJECT are required locally');
+    return 1;
+  }
+  io.log(await subjectHash(issuer, subject));
+  return 0;
+}
+
+const entry = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';
+if (entry && import.meta.url === entry) {
+  process.exitCode = await main();
 }
 ```
 
@@ -724,20 +719,20 @@ Add package script:
 "oauth:subject-hash": "node scripts/subject-hash.mjs"
 ```
 
-Update `smoke` to syntax/import-check `subject-hash.mjs` without executing its main path.
+Update `smoke` so it syntax-checks and imports `subject-hash.mjs`; the main guard must prevent CLI execution on import.
 
-- [ ] **Step 6: Run verification**
+- [ ] **Step 7: Verify GREEN**
 
 ```bash
-node --test test/live-smoke.test.js test/subject-hash.test.js
-npm test
-npm run smoke
-npm run cf:dry-run
+node --test teddy-memory-plugin/test/live-smoke.test.js teddy-memory-plugin/test/subject-hash.test.js
+npm --prefix teddy-memory-plugin test
+npm --prefix teddy-memory-plugin run smoke
+npm --prefix teddy-memory-plugin run cf:dry-run
 ```
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit GREEN**
+- [ ] **Step 8: Commit GREEN**
 
 ```bash
 git add teddy-memory-plugin/scripts teddy-memory-plugin/package.json teddy-memory-plugin/package-lock.json
@@ -746,30 +741,31 @@ git commit -m "feat: add non-leaking oauth smoke tools"
 
 ---
 
-### Task 6: Tracked OAuth Configuration, CI Boundary, and Operator Runbook
+## Task 6: OAuth-Only Tracked Configuration and Operator Runbook
 
 **Files:**
+- Create: `teddy-memory-plugin/test/config-boundary.test.js`
 - Modify: `teddy-memory-plugin/wrangler.jsonc`
 - Modify: `teddy-memory-plugin/README.md`
 - Create: `teddy-memory-plugin/docs/AUTH0_RUNBOOK.md`
-- Modify only if needed for path coverage: `.github/workflows/teddy-memory-plugin.yml`
-- Create/modify tests as required for static boundary assertions.
+- Modify: `.github/workflows/teddy-memory-plugin.yml` only if needed to include a newly required verification command.
 
 **Interfaces:**
-- Tracked vars before the real Auth0 issuer is known:
+- Tracked before the Auth0 tenant exists:
 
 ```text
 PLUGIN_OAUTH_RESOURCE=https://teddy-memory-plugin.3767174214.workers.dev/mcp
 PLUGIN_OAUTH_REQUIRED_SCOPE=memory:read
 PLUGIN_ALLOWED_HOSTS=teddy-memory-plugin.3767174214.workers.dev
 PLUGIN_ALLOWED_ORIGINS=
+SAFE_DB=teddy-memory-plugin-safe
 ```
 
-- `PLUGIN_OAUTH_ISSUER` is added as a tracked non-secret value only after the Auth0 tenant is created and the exact issuer is known.
+- `PLUGIN_OAUTH_ISSUER` is added as public tracked configuration only after the exact tenant issuer is known in Task 7.
 
-- [ ] **Step 1: Add failing static boundary tests**
+- [ ] **Step 1: Write failing static config-boundary test**
 
-Add a test that reads `wrangler.jsonc` and asserts:
+Read `wrangler.jsonc` as text and assert:
 
 ```text
 SAFE_DB is the only D1 binding
@@ -779,121 +775,111 @@ MCP_ACCESS_TOKEN absent
 MEMORY_API_KEY absent
 TEDDY_MEMORY_API absent
 PLUGIN_OAUTH_RESOURCE exact canonical /mcp URL
-PLUGIN_OAUTH_REQUIRED_SCOPE exactly memory:read
+PLUGIN_OAUTH_REQUIRED_SCOPE exact memory:read
 ```
 
-Also assert the README/runbook never instructs users to paste secrets into Git.
+The test must not require `PLUGIN_OAUTH_ISSUER` yet.
 
-- [ ] **Step 2: Run RED and commit**
+- [ ] **Step 2: Verify RED**
 
 ```bash
-node --test test/worker.test.js test/oauth-config.test.js
+node --test teddy-memory-plugin/test/config-boundary.test.js
 ```
 
-Expected: FAIL while `PLUGIN_DEV_OWNER_ID` remains tracked.
+Expected: FAIL because current Plan 2 tracked config still has `PLUGIN_DEV_OWNER_ID` and lacks OAuth resource/scope vars.
 
-Commit the RED test with:
+- [ ] **Step 3: Commit RED**
 
 ```bash
-git commit -am "test: require oauth-only worker configuration"
+git add teddy-memory-plugin/test/config-boundary.test.js
+git commit -m "test: require oauth-only worker configuration"
 ```
 
-- [ ] **Step 3: Update `wrangler.jsonc`**
+- [ ] **Step 4: Update Wrangler config**
 
-Remove:
-
-```json
-"PLUGIN_DEV_OWNER_ID": "teddy-primary"
-```
-
-Add:
+Remove `PLUGIN_DEV_OWNER_ID`. Add exactly:
 
 ```json
 "PLUGIN_OAUTH_RESOURCE": "https://teddy-memory-plugin.3767174214.workers.dev/mcp",
 "PLUGIN_OAUTH_REQUIRED_SCOPE": "memory:read"
 ```
 
-Do not invent an issuer value. The Worker stays undeployable as OAuth until Task 7 inserts the exact real issuer.
+Do not invent an Auth0 issuer. OAuth deployment remains intentionally blocked until Task 7 supplies the exact public issuer.
 
-- [ ] **Step 4: Write the Auth0 runbook**
+- [ ] **Step 5: Write `AUTH0_RUNBOOK.md`**
 
-The runbook must include these exact gates:
+It must explicitly require:
 
 ```text
-1. Create/select Auth0 tenant.
-2. Enable Settings -> Advanced -> Resource Parameter Compatibility Profile.
-3. Create Custom API with Identifier = canonical /mcp resource.
-4. Keep RS256 signing.
-5. Add permission memory:read.
-6. Enable Allow Offline Access.
-7. Create the ChatGPT OAuth application only from the ChatGPT setup flow so the exact callback URL is copied, never guessed.
-8. Enable Authorization Code + PKCE S256 and refresh-token support/rotation.
-9. Copy the public Auth0 issuer exactly from tenant/OIDC metadata.
-10. Add that public issuer to `wrangler.jsonc` as PLUGIN_OAUTH_ISSUER and commit it.
-11. Apply `sql/001_oauth_principals.sql` remotely.
-12. Hash the intended Auth0 subject locally; insert only issuer + subject_hash + teddy-primary + active flag into D1.
-13. Verify mapping count before cutover.
-14. Record current known-good Plan 2 Worker Version ID for rollback.
-15. Deploy OAuth-only Worker and run live verification immediately.
-16. Roll back if any OAuth/ChatGPT gate fails; never add a staging fallback.
-17. After successful cutover, delete PLUGIN_DEV_ACCESS_TOKEN locally from Cloudflare and rerun OAuth smoke.
+Auth0 Resource Parameter Compatibility Profile enabled
+Custom API Identifier = canonical /mcp resource
+RS256
+permission memory:read
+Allow Offline Access
+refresh-token-capable Authorization Code + PKCE S256 client
+exact ChatGPT callback URL copied from ChatGPT, never guessed
+exact public issuer copied from Auth0/OIDC discovery
+remote oauth_principals schema application
+local raw-sub hashing; only hash inserted into D1
+known-good Plan 2 Worker Version ID recorded before cutover
+OAuth-only deploy, immediate smoke, rollback on failure
+staging secret deletion only after OAuth live success
+4227/4227/4227 safe-memory count recheck
 ```
 
-- [ ] **Step 5: Update README**
+- [ ] **Step 6: Update README**
 
-Describe Plan 3 as OAuth-only, point at `docs/AUTH0_RUNBOOK.md`, and remove staging deployment as the current deployment path. Keep historical wording only when explicitly labeled Plan 2.
+Describe Plan 3 as OAuth-only and point to the runbook. Historical staging instructions may remain only under an explicitly historical Plan 2 section; current deployment instructions must not tell operators to use the staging bearer.
 
-- [ ] **Step 6: Run full local/CI-equivalent verification**
+- [ ] **Step 7: Verify GREEN**
 
 ```bash
-npm install
-npm test
-npm run smoke
-npm run cf:dry-run
+node --test teddy-memory-plugin/test/config-boundary.test.js
+npm --prefix teddy-memory-plugin install
+npm --prefix teddy-memory-plugin test
+npm --prefix teddy-memory-plugin run smoke
+npm --prefix teddy-memory-plugin run cf:dry-run
 ```
 
-Expected: PASS.
+Expected: PASS; dry-run lists only `SAFE_DB` as D1.
 
-- [ ] **Step 7: Commit GREEN**
+- [ ] **Step 8: Commit GREEN**
 
 ```bash
-git add teddy-memory-plugin/wrangler.jsonc teddy-memory-plugin/README.md teddy-memory-plugin/docs/AUTH0_RUNBOOK.md .github/workflows/teddy-memory-plugin.yml teddy-memory-plugin/test
+git add teddy-memory-plugin/wrangler.jsonc teddy-memory-plugin/README.md teddy-memory-plugin/docs/AUTH0_RUNBOOK.md .github/workflows/teddy-memory-plugin.yml
 git commit -m "docs: add auth0 oauth deployment boundary"
 ```
 
+If the workflow file is unchanged, omit it from `git add`.
+
 ---
 
-### Task 7: Auth0 Tenant Setup, Principal Registration, and Pre-Cutover Verification
+## Task 7: Auth0 Tenant Setup and Explicit Principal Registration
 
 **Files:**
-- Modify after operator obtains exact public issuer: `teddy-memory-plugin/wrangler.jsonc`
-- No secret file is created or committed.
+- Modify after exact issuer is known: `teddy-memory-plugin/wrangler.jsonc`
+- Never create/commit a secret file.
 
 **Interfaces:**
-- Operator supplies only public/non-secret verification results to the development log.
-- Raw Auth0 client secret, access token, and raw `sub` remain local.
+- Operator shares only non-secret results: public issuer if needed, aggregate principal counts, aggregate live-smoke JSON, and Worker version/deploy success.
+- Auth0 client secret, access token, raw `sub`, and real subject hash remain local.
 
-- [ ] **Step 1: Create/configure Auth0 according to the runbook**
+- [ ] **Step 1: Configure Auth0 using the committed runbook**
 
-Complete the runbook through the point where the exact issuer is known. Do not send the Auth0 client secret, access token, or raw subject through chat/GitHub.
+Complete tenant compatibility profile, Custom API, permission, offline access, and OAuth client setup. If ChatGPT app setup is unavailable on the current plan/workspace, create the Auth0 API/client configuration that can be verified independently and leave the ChatGPT callback/account-linking gate explicitly pending.
 
-- [ ] **Step 2: Add the exact public issuer to tracked config**
+- [ ] **Step 2: Capture the exact public issuer locally**
 
-In PowerShell, copy the public issuer from Auth0/OIDC discovery without exposing any secret:
+**PowerShell operator command:**
 
 ```powershell
-$issuer = Read-Host "Paste the public Auth0 issuer URL"
+$issuer = (Read-Host "Paste the public Auth0 issuer URL").Trim()
+if (-not $issuer.StartsWith("https://") -or -not $issuer.EndsWith("/")) { throw "Issuer must be an HTTPS Auth0 issuer ending in /" }
 ```
 
-Edit `wrangler.jsonc` so:
+Edit `PLUGIN_OAUTH_ISSUER` in `wrangler.jsonc` to the exact string currently held in `$issuer`. This value is public OAuth discovery metadata, not a credential.
 
-```json
-"PLUGIN_OAUTH_ISSUER": "the exact value copied from Auth0"
-```
-
-The actual committed value is public OAuth discovery metadata, not a credential.
-
-- [ ] **Step 3: Run tests/dry-run before committing issuer**
+- [ ] **Step 3: Verify before issuer commit**
 
 ```powershell
 npm test
@@ -901,9 +887,11 @@ npm run smoke
 npm run cf:dry-run
 ```
 
-Expected: PASS and dry-run shows only `SAFE_DB` plus non-secret OAuth vars.
+Run these commands from `D:\Knowledge-Chatgpt\teddy-memory-plugin` in the local operator environment. Expected: PASS and only `SAFE_DB` D1 binding.
 
-- [ ] **Step 4: Commit the issuer config**
+- [ ] **Step 4: Commit exact public issuer**
+
+From repository root:
 
 ```bash
 git add teddy-memory-plugin/wrangler.jsonc
@@ -912,76 +900,66 @@ git commit -m "config: set auth0 oauth issuer"
 
 - [ ] **Step 5: Apply the identity schema remotely**
 
+**PowerShell operator command from `teddy-memory-plugin`:**
+
 ```powershell
 npx wrangler d1 execute teddy-memory-plugin-safe --remote --file=sql/001_oauth_principals.sql
-```
-
-Then verify the table exists without reading any subject hash:
-
-```powershell
 npx wrangler d1 execute teddy-memory-plugin-safe --remote --command="SELECT COUNT(*) AS principal_rows FROM oauth_principals;"
 ```
 
-Expected before registration: `principal_rows = 0` unless an intentionally registered mapping already exists.
+Expected before first registration: `principal_rows=0` unless an intentionally registered mapping already exists.
 
-- [ ] **Step 6: Hash the intended Auth0 subject locally**
+- [ ] **Step 6: Hash intended Auth0 subject locally**
 
 ```powershell
 $env:PLUGIN_OAUTH_ISSUER=$issuer
-$env:PLUGIN_OAUTH_SUBJECT=Read-Host "Paste the intended Auth0 user subject locally"
-$subjectHash = (npm run -s oauth:subject-hash).Trim()
+$env:PLUGIN_OAUTH_SUBJECT=(Read-Host "Paste the intended Auth0 user subject locally")
+$subjectHash=(npm run -s oauth:subject-hash).Trim()
 Remove-Item Env:PLUGIN_OAUTH_SUBJECT
 if ($subjectHash -notmatch '^[0-9a-f]{64}$') { throw "Invalid subject hash" }
 ```
 
-Do not print `$subjectHash` into chat/GitHub. It may remain in the local shell only long enough to register the mapping.
+Do not echo `$subjectHash` into chat/GitHub.
 
-- [ ] **Step 7: Insert/update only the hashed mapping**
-
-Build a local command from the already-public issuer, local hash, fixed owner, and active flag:
+- [ ] **Step 7: Register only issuer + hash + owner locally**
 
 ```powershell
-$sql = "INSERT INTO oauth_principals (issuer, subject_hash, owner_id, is_active) VALUES ('$issuer', '$subjectHash', 'teddy-primary', 1) ON CONFLICT(issuer, subject_hash) DO UPDATE SET owner_id='teddy-primary', is_active=1;"
+$sql="INSERT INTO oauth_principals (issuer, subject_hash, owner_id, is_active) VALUES ('$issuer', '$subjectHash', 'teddy-primary', 1) ON CONFLICT(issuer, subject_hash) DO UPDATE SET owner_id='teddy-primary', is_active=1;"
 npx wrangler d1 execute teddy-memory-plugin-safe --remote --command=$sql
 Remove-Variable subjectHash
 Remove-Variable sql
 ```
 
-- [ ] **Step 8: Verify mapping aggregate only**
+- [ ] **Step 8: Verify principal aggregate only**
 
 ```powershell
 npx wrangler d1 execute teddy-memory-plugin-safe --remote --command="SELECT COUNT(*) AS principal_rows, SUM(CASE WHEN owner_id='teddy-primary' AND is_active=1 THEN 1 ELSE 0 END) AS active_teddy FROM oauth_principals;"
 ```
 
-Expected for the initial single-user mapping: `principal_rows = 1`, `active_teddy = 1`.
+Expected initial single-user mapping: `principal_rows=1`, `active_teddy=1`.
 
-- [ ] **Step 9: Obtain an Auth0 access token locally and run pre-cutover cryptographic smoke against a local/test Worker boundary**
-
-Do not paste the token into chat. Export only into the local process:
+- [ ] **Step 9: Keep a local Auth0 access token only in process memory**
 
 ```powershell
-$env:PLUGIN_OAUTH_ACCESS_TOKEN=Read-Host "Paste a local Auth0 access token"
+$env:PLUGIN_OAUTH_ACCESS_TOKEN=(Read-Host "Paste a local Auth0 access token")
 ```
 
-Use test tooling or a non-production preview only if its configured resource/audience exactly matches the canonical production resource. If a preview URL changes the resource identity, skip preview token validation and proceed to the atomic production cutover with the known Plan 2 rollback version recorded.
+Do not send it through chat/GitHub. Preview-host verification is allowed only if the token audience remains the canonical production resource; otherwise skip preview auth and rely on the atomic production cutover/rollback procedure.
 
-- [ ] **Step 10: Record known-good Plan 2 Worker Version ID locally**
+- [ ] **Step 10: Record the known-good Plan 2 Worker Version ID locally for rollback**
 
-From the last successful Plan 2 deployment, retain the known version ID in the operator notes. Do not modify production yet.
+Do not mutate production yet.
 
 ---
 
-### Task 8: Atomic OAuth-Only Production Cutover and Live Verification
+## Task 8: Atomic OAuth-Only Production Cutover and Live Verification
 
 **Files:**
-- No code change unless live verification exposes a reproducible bug; any bug fix returns to TDD before redeploy.
-- Update roadmap only after all gates pass.
+- No code change unless verification finds a reproducible defect. Any defect returns to TDD before redeploy.
 
-**Interfaces:**
-- Live smoke consumes local `TEDDY_PLUGIN_URL` and `PLUGIN_OAUTH_ACCESS_TOKEN`.
-- Operator reports only aggregate output and D1 counts.
+- [ ] **Step 1: Fresh pre-deploy local verification**
 
-- [ ] **Step 1: Fresh pre-deploy verification on the exact head**
+**PowerShell operator command from `teddy-memory-plugin`:**
 
 ```powershell
 npm install
@@ -992,18 +970,9 @@ npm run cf:dry-run
 
 Expected: all PASS.
 
-- [ ] **Step 2: Verify current GitHub Actions head is green**
+- [ ] **Step 2: Verify GitHub Actions for the exact deploy head**
 
-Required steps:
-
-```text
-npm install
-npm test
-npm run smoke
-npm run cf:dry-run
-```
-
-Do not deploy a head with failed/pending verification.
+Require successful `npm install`, `npm test`, `npm run smoke`, `npm run cf:dry-run`. Never deploy based on an older green SHA.
 
 - [ ] **Step 3: Deploy OAuth-only Worker**
 
@@ -1011,32 +980,28 @@ Do not deploy a head with failed/pending verification.
 npx wrangler deploy
 ```
 
-Confirm the production trigger remains exactly:
+Expected production trigger: `https://teddy-memory-plugin.3767174214.workers.dev`.
 
-```text
-https://teddy-memory-plugin.3767174214.workers.dev
-```
-
-- [ ] **Step 4: Verify public health + protected-resource metadata immediately**
+- [ ] **Step 4: Verify health and metadata**
 
 ```powershell
 curl.exe -sS -i https://teddy-memory-plugin.3767174214.workers.dev/healthz
 curl.exe -sS -i https://teddy-memory-plugin.3767174214.workers.dev/.well-known/oauth-protected-resource
 ```
 
-Expected: both HTTP 200; metadata has canonical resource, exact Auth0 issuer, `memory:read`, and no `offline_access`.
+Expected: HTTP 200. Metadata has canonical resource, exact public Auth0 issuer, `memory:read`, no `offline_access`.
 
-- [ ] **Step 5: Verify anonymous OAuth challenge**
+- [ ] **Step 5: Verify anonymous challenge**
 
 ```powershell
 curl.exe -sS -i -X POST https://teddy-memory-plugin.3767174214.workers.dev/mcp -H "Content-Type: application/json" -d "{}"
 ```
 
-Expected: HTTP 401 and `WWW-Authenticate` contains `resource_metadata=` and `scope="memory:read"`; no staging realm.
+Expected: HTTP 401 with `resource_metadata=` and `scope="memory:read"`; no staging realm.
 
-- [ ] **Step 6: Run authenticated live smoke locally**
+- [ ] **Step 6: Run authenticated aggregate-only smoke**
 
-If the machine requires its existing proxy for Node fetch, keep:
+If this Windows environment still requires proxy opt-in for Node fetch:
 
 ```powershell
 $env:NODE_USE_ENV_PROXY="1"
@@ -1046,63 +1011,54 @@ Then:
 
 ```powershell
 $env:TEDDY_PLUGIN_URL="https://teddy-memory-plugin.3767174214.workers.dev"
-# PLUGIN_OAUTH_ACCESS_TOKEN must already exist only in this local shell
 npm run live:smoke
 ```
 
-Expected aggregate-only stdout:
+`PLUGIN_OAUTH_ACCESS_TOKEN` must already exist locally. Expected stdout:
 
 ```json
 {"health":true,"metadata":true,"anonymous_401":true,"oauth_authenticated":true,"tools":3,"search_result_count":4,"unknown_ref_not_found":true}
 ```
 
-- [ ] **Step 7: Test ChatGPT account linking when a supported ChatGPT plan/workspace is available**
+- [ ] **Step 7: Verify ChatGPT account linking on a supported plan/workspace**
 
-In ChatGPT developer/app setup:
+Configure the MCP endpoint exactly as:
 
 ```text
-MCP endpoint = https://teddy-memory-plugin.3767174214.workers.dev/mcp
-Authentication = OAuth
-Callback URL = copy exactly from ChatGPT into Auth0
+https://teddy-memory-plugin.3767174214.workers.dev/mcp
 ```
 
-Complete authorization, scan tools, and verify exactly three tools. If the current ChatGPT plan/workspace does not expose custom MCP OAuth setup, record this gate as blocked by product availability rather than fabricating completion.
+Choose OAuth, copy ChatGPT's exact callback URL into Auth0, authorize, scan tools, and verify exactly three read-only tools. If the setup UI is unavailable for the active plan/workspace, record this specific gate as blocked and do not mark Plan 3 COMPLETE.
 
-- [ ] **Step 8: On any live OAuth failure, rollback instead of enabling staging fallback**
+- [ ] **Step 8: Roll back on any OAuth live failure**
 
-Use the recorded known-good Plan 2 Worker version through Cloudflare's normal version rollback mechanism. After rollback, reproduce the OAuth failure locally/CI and return to the relevant TDD task before the next cutover attempt.
+Use the recorded known-good Plan 2 Worker Version ID through Cloudflare's version rollback mechanism. Do not add a staging-token fallback to OAuth code. Reproduce the bug, add a failing test, implement the minimal fix, rerun all verification, then attempt cutover again.
 
-- [ ] **Step 9: If OAuth live gates pass, delete the retired staging secret locally**
+- [ ] **Step 9: After successful OAuth cutover, delete retired staging secret**
 
 ```powershell
 npx wrangler secret delete PLUGIN_DEV_ACCESS_TOKEN
 ```
 
-Never reveal the secret value.
+Never reveal its value.
 
-- [ ] **Step 10: Rerun OAuth live smoke after secret deletion**
+- [ ] **Step 10: Rerun authenticated smoke after secret deletion**
 
 ```powershell
 npm run live:smoke
 ```
 
-Expected: same aggregate PASS JSON; proving the deployed Worker does not depend on the staging secret.
+Expected: identical aggregate PASS JSON, proving the Worker no longer depends on the staging secret.
 
-- [ ] **Step 11: Reverify safe-memory row counts**
+- [ ] **Step 11: Reverify safe-memory aggregate**
 
 ```powershell
 npx wrangler d1 execute teddy-memory-plugin-safe --remote --command="SELECT COUNT(*) AS total, SUM(CASE WHEN owner_id='teddy-primary' THEN 1 ELSE 0 END) AS teddy_primary, SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END) AS active FROM safe_memories;"
 ```
 
-Expected exactly:
+Expected exactly `4227 / 4227 / 4227`.
 
-```text
-total=4227
-teddy_primary=4227
-active=4227
-```
-
-- [ ] **Step 12: Reverify principal mapping aggregate**
+- [ ] **Step 12: Reverify principal aggregate**
 
 ```powershell
 npx wrangler d1 execute teddy-memory-plugin-safe --remote --command="SELECT COUNT(*) AS principal_rows, SUM(CASE WHEN owner_id='teddy-primary' AND is_active=1 THEN 1 ELSE 0 END) AS active_teddy FROM oauth_principals;"
@@ -1112,119 +1068,109 @@ Expected initial deployment: `principal_rows=1`, `active_teddy=1`.
 
 ---
 
-### Task 9: Roadmap, Security Audit, and Stacked Draft PR
+## Task 9: Roadmap, Security Audit, and Draft Stacked PR
 
 **Files:**
 - Modify: `TEDDY_MEMORY_PLUGIN_ROADMAP.md`
-- No other code changes unless verification finds a defect.
 
-**Interfaces:**
-- PR base: `feat/teddy-memory-plugin`
-- PR head: `feat/teddy-memory-oauth`
+**PR:**
+- Head: `feat/teddy-memory-oauth`
+- Base: `feat/teddy-memory-plugin`
+- Title: `feat: add Auth0 OAuth to Teddy Memory plugin`
+- Draft: yes until all applicable live gates are complete.
 
-- [ ] **Step 1: Update roadmap only with facts that actually passed**
+- [ ] **Step 1: Update roadmap only with observed facts**
 
-If ChatGPT account linking is still blocked by plan/workspace availability, mark Worker/Auth0 OAuth implementation and token live smoke complete but keep the ChatGPT account-linking gate explicitly pending. Do not mark Plan 3 fully COMPLETE until the spec's required live ChatGPT gate is satisfied or the spec is deliberately amended and re-approved.
+If ChatGPT account linking is product-availability blocked, record Worker/Auth0/token live verification separately and keep the ChatGPT linking gate pending. Do not mark Plan 3 COMPLETE unless the approved spec completion gate is satisfied or the spec is explicitly amended and re-approved.
 
-- [ ] **Step 2: Run final repository leakage checks**
+- [ ] **Step 2: Run leakage/boundary search on changed tree**
 
-Search changed files/diff for:
+Inspect diff/filenames for real values or unsafe files:
 
 ```text
-PLUGIN_DEV_ACCESS_TOKEN value
+staging token value
 MCP_ACCESS_TOKEN value
 MEMORY_API_KEY value
 Auth0 client secret
 Bearer access token
-raw Auth0 sub
-subject hash fixture derived from real user
-TEDDY_MEMORY_API private fallback
+raw real Auth0 sub
+real subject hash
+TEDDY_MEMORY_API fallback
 teddy-memory-core binding
 teddy-memory-api binding
-get_conversation public tool
+public get_conversation tool
 .env
 .dev.vars
 dist/
 Safe Corpus work files
 ```
 
-Expected: no real credentials/private identity material; private-track names may appear only in negative documentation/tests that state they are forbidden.
+Private-track names are allowed only in negative docs/tests that state they are forbidden.
 
-- [ ] **Step 3: Fresh full verification**
+- [ ] **Step 3: Fresh final verification from repo root**
 
 ```bash
-cd teddy-memory-plugin
-npm install
-npm test
-npm run smoke
-npm run cf:dry-run
+npm --prefix teddy-memory-plugin install
+npm --prefix teddy-memory-plugin test
+npm --prefix teddy-memory-plugin run smoke
+npm --prefix teddy-memory-plugin run cf:dry-run
 ```
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit roadmap verification**
+- [ ] **Step 4: Commit roadmap evidence**
 
 ```bash
 git add TEDDY_MEMORY_PLUGIN_ROADMAP.md
 git commit -m "docs: record Plan 3 oauth verification"
 ```
 
-- [ ] **Step 5: Open/update a Draft stacked PR**
-
-Create a Draft PR:
-
-```text
-head: feat/teddy-memory-oauth
-base: feat/teddy-memory-plugin
-title: feat: add Auth0 OAuth to Teddy Memory plugin
-```
+- [ ] **Step 5: Create/update Draft PR**
 
 PR body must state:
 
 ```text
-- Auth0 is Authorization Server; Worker is Resource Server only.
-- RFC 9728 metadata and RFC 8707 canonical resource are implemented.
-- RS256/JWKS issuer/audience/scope validation is fail-closed.
-- Auth0 iss+sub is hashed before D1 principal mapping.
-- Safe-memory SQL owner/is_active scoping is unchanged.
-- Public tool surface remains exactly three read-only tools.
-- Staging bearer fallback is removed from the OAuth Worker.
-- No Auth0/client/private-memory secret is committed.
-- Live OAuth/D1/ChatGPT gates are listed individually with actual status.
+Auth0 is Authorization Server; Worker is Resource Server only
+RFC 9728 metadata + canonical resource implemented
+RS256/JWKS issuer/audience/scope validation fail-closed
+iss+sub hashed before principal mapping
+safe-memory owner/is_active SQL unchanged
+exactly three read-only tools remain
+staging fallback removed from OAuth Worker
+no OAuth/private-memory secrets committed
+all live gates listed individually with actual status
 ```
 
-- [ ] **Step 6: Verify PR head and CI after the final documentation commit**
+- [ ] **Step 6: Verify final PR head and CI**
 
-Do not claim completion from an older CI run. Fetch the final head SHA and verify the relevant GitHub Actions run for that exact code head is green.
+Fetch the final head SHA and require a green relevant GitHub Actions run for that exact code head. An older green run is not completion evidence.
 
 ---
 
 ## Plan 3 Completion Checklist
 
-Plan 3 may be marked **COMPLETE** only if all checked items are supported by fresh evidence:
-
 ```text
 [ ] Auth0 Resource Parameter Compatibility Profile enabled
-[ ] Auth0 Custom API identifier exactly canonical /mcp resource
+[ ] Custom API identifier exactly canonical /mcp resource
 [ ] RS256 enabled
 [ ] memory:read permission defined
 [ ] Allow Offline Access enabled
-[ ] refresh-token-capable OAuth application configured
-[ ] exact ChatGPT callback URL registered, when supported ChatGPT app setup is available
+[ ] refresh-token-capable Authorization Code + PKCE S256 client configured
+[ ] exact ChatGPT callback registered when supported ChatGPT setup is available
 [ ] RFC 9728 metadata publicly reachable
-[ ] anonymous /mcp -> standards-compatible 401 challenge
-[ ] valid Auth0 RS256 token authenticates
+[ ] anonymous /mcp returns standards-compatible 401 challenge
+[ ] valid Auth0 token authenticates
 [ ] wrong issuer/audience/expiry/nbf/algorithm/scope fail closed in tests
 [ ] only explicitly mapped principal resolves teddy-primary
-[ ] oauth_principals uses hashed subject, no raw sub column
-[ ] exactly three MCP tools exposed
-[ ] benign memory lookup succeeds
+[ ] oauth_principals stores subject_hash, no raw sub column
+[ ] exactly three MCP tools remain
+[ ] benign safe-memory lookup succeeds
 [ ] unknown memory_ref remains neutral
 [ ] staging auth runtime/test path removed
-[ ] PLUGIN_DEV_ACCESS_TOKEN deleted after successful cutover
-[ ] SAFE_DB remains the only D1 binding
-[ ] safe_memories remains 4227 / 4227 teddy-primary / 4227 active
-[ ] principal mapping aggregate matches intended registered identities
+[ ] PLUGIN_DEV_ACCESS_TOKEN deleted after successful OAuth cutover
+[ ] SAFE_DB remains only D1 binding
+[ ] safe_memories remains 4227 / 4227 / 4227
+[ ] principal aggregate matches intended mappings
 [ ] CI install/test/smoke/cf:dry-run green at final code head
 [ ] private MCP track unchanged
 [ ] ChatGPT account linking verified on a supported plan/workspace, or explicitly pending without falsely claiming Plan 3 complete
