@@ -1,0 +1,18 @@
+{
+  "name": "teddy-memory-plugin",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-08-29",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "SAFE_DB",
+      "database_name": "teddy-memory-plugin-safe",
+      "database_id": "cf36e706-91f5-44e7-8dc5-1530c04a2e95"
+    }
+  ],
+  "vars": {
+    "PLUGIN_ALLOWED_HOSTS": "teddy-memory-plugin.3767174214.workers.dev",
+    "PLUGIN_ALLOWED_ORIGINS": "",
+    "PLUGIN_DEV_OWNER_ID": "teddy-primary"
+  }
+}
