@@ -1,12 +1,15 @@
 import { pathToFileURL } from 'node:url';
+import { readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { readJsonl, writeJsonl } from './jsonl.js';
 import { normalizeConversation, normalizeSourceMessage } from './contracts.js';
 import { buildCandidate } from './candidates.js';
 import { compileApprovedMemory } from './approval.js';
-import { scanCandidateFields } from './policy.js';
+import { scanCandidateFields, scanRestrictedText } from './policy.js';
 import { writeD1Batches } from './d1-export.js';
 
 const CATEGORIES = new Set(['project', 'learning', 'decision', 'plan', 'preference', 'reference']);
+const PRIVATE_ID_MARKERS = ['conversation_id', 'message_id', 'source_archive_id', 'source_conversation_id', 'original_message_id'];
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -49,6 +52,10 @@ function sortApprovedRows(rows) {
     if (aTime !== bTime) return aTime - bTime;
     return a.id.localeCompare(b.id);
   });
+}
+
+function incrementCounter(target, key) {
+  target[key] = (target[key] || 0) + 1;
 }
 
 async function loadConversationTitles(path) {
@@ -237,6 +244,60 @@ async function exportD1(options, io) {
   return 0;
 }
 
+async function auditSafe(options, io) {
+  const approvedPath = requireOption(options, 'approved');
+  const sqlDir = requireOption(options, 'sql-dir');
+  let approvedRecords = 0;
+  let validationErrors = 0;
+  const restrictedReasons = {};
+  const privateIdMarkers = {};
+
+  for await (const row of readJsonl(approvedPath)) {
+    approvedRecords += 1;
+    try {
+      validateApprovedRow(row);
+    } catch (error) {
+      validationErrors += 1;
+      const message = String(error?.message || '');
+      if (message.startsWith('safe memory rejected by policy:')) {
+        const reasons = message.slice('safe memory rejected by policy:'.length).split(',').map((value) => value.trim()).filter(Boolean);
+        for (const reason of reasons) incrementCounter(restrictedReasons, reason);
+      }
+      if (message.includes('private source identifiers')) incrementCounter(privateIdMarkers, 'approved_row_private_id');
+    }
+  }
+
+  const sqlFiles = (await readdir(sqlDir)).filter((name) => name.toLowerCase().endsWith('.sql')).sort();
+  for (const name of sqlFiles) {
+    const sql = await readFile(join(sqlDir, name), 'utf8');
+    for (const reason of scanRestrictedText(sql)) incrementCounter(restrictedReasons, reason);
+    const lower = sql.toLowerCase();
+    for (const marker of PRIVATE_ID_MARKERS) {
+      if (lower.includes(marker)) incrementCounter(privateIdMarkers, marker);
+    }
+  }
+
+  const ok = validationErrors === 0
+    && Object.keys(restrictedReasons).length === 0
+    && Object.keys(privateIdMarkers).length === 0;
+  const result = {
+    ok,
+    command: 'audit-safe',
+    approved_records: approvedRecords,
+    sql_files: sqlFiles.length,
+    validation_errors: validationErrors,
+    restricted_reasons: restrictedReasons,
+    private_id_markers: privateIdMarkers,
+  };
+
+  if (ok) {
+    writeJson(io.stdout, result);
+    return 0;
+  }
+  io.stderr.write(`Audit failed: ${JSON.stringify(result)}\n`);
+  return 1;
+}
+
 async function stats(options, io) {
   const path = requireOption(options, 'file');
   let records = 0;
@@ -268,8 +329,9 @@ export async function main(argv = process.argv.slice(2), io = { stdout: process.
     if (command === 'compile-approved') return await compileApproved(options, io);
     if (command === 'compile-auto-safe') return await compileAutoSafe(options, io);
     if (command === 'export-d1') return await exportD1(options, io);
+    if (command === 'audit-safe') return await auditSafe(options, io);
     if (command === 'stats') return await stats(options, io);
-    throw new TypeError('command must be build-candidates, compile-approved, compile-auto-safe, export-d1, or stats');
+    throw new TypeError('command must be build-candidates, compile-approved, compile-auto-safe, export-d1, audit-safe, or stats');
   } catch (error) {
     io.stderr.write(`Error: ${String(error?.message || 'operation failed')}\n`);
     return 1;
