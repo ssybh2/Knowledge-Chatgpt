@@ -61,9 +61,19 @@ async function buildCandidates(options, io) {
   const candidates = [];
   const seen = new Set();
   let scanned = 0;
+  let invalidMessages = 0;
   for await (const raw of readJsonl(messagesPath)) {
     scanned += 1;
-    const message = normalizeSourceMessage(raw);
+    let message;
+    try {
+      message = normalizeSourceMessage(raw);
+    } catch (error) {
+      if (error instanceof TypeError) {
+        invalidMessages += 1;
+        continue;
+      }
+      throw error;
+    }
     const candidate = buildCandidate({ ownerId, message, conversationTitle: titles.get(message.conversation_id) });
     if (!candidate || seen.has(candidate.candidate_id)) continue;
     seen.add(candidate.candidate_id);
@@ -75,6 +85,7 @@ async function buildCandidates(options, io) {
     ok: true,
     command: 'build-candidates',
     scanned_messages: scanned,
+    invalid_messages: invalidMessages,
     candidates: candidates.length,
     blocked: candidates.filter((row) => row.blocked_reasons.length > 0).length,
   });
